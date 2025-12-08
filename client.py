@@ -145,20 +145,32 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                     
                     # Send additional messages
                     additional_data = f"USER_MESSAGE: {user_input}".encode('utf-8')
-                    print(f"[>] Sending: {user_input}")
+                    print(f"\n[>] Sending: {user_input}")
                     for i in range(0, len(additional_data), CHUNK_SIZE):
                         chunk = additional_data[i:i + CHUNK_SIZE]
                         writer.write(chunk)
                         await writer.drain()
                         await asyncio.sleep(random.uniform(0.01, 0.05))
                     
-                    # Read response
-                    response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
-                    if response:
+                    print(f"[~] Sent {len(additional_data)} bytes, waiting for response...")
+                    
+                    # Read response (with loop to handle PING/PONG)
+                    while True:
+                        response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
+                        if not response:
+                            print("[-] Connection lost")
+                            break
+                        
+                        # Handle server PING
+                        if response == b'SERVER_PING':
+                            print("[~] Received SERVER_PING, sending PONG")
+                            writer.write(b'PONG')
+                            await writer.drain()
+                            continue
+                        
+                        # Got actual response
                         response_text = response.decode('utf-8', errors='ignore')
-                        print(f"[<] Server response: {response_text}")
-                    else:
-                        print("[-] Connection lost")
+                        print(f"[<] Server response: {response_text}\n")
                         break
                         
                 except asyncio.TimeoutError:

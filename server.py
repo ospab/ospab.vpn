@@ -172,6 +172,12 @@ async def handle_client(reader, writer):
                 last_ping_time = asyncio.get_event_loop().time()
                 continue
             
+            # Handle client PONG response to server PING
+            if data == b'PONG':
+                print(f"[~] Received PONG from {addr}")
+                last_ping_time = asyncio.get_event_loop().time()
+                continue
+            
             # Send PING if no activity for KEEP_ALIVE_INTERVAL
             current_time = asyncio.get_event_loop().time()
             if current_time - last_ping_time > KEEP_ALIVE_INTERVAL:
@@ -186,14 +192,14 @@ async def handle_client(reader, writer):
             
             # Decode and display message content
             decoded_data = data.decode('utf-8', errors='ignore')
-            print(f"[~] Received {len(data)} bytes from {addr}")
-            print(f"[<] Message: {decoded_data}")
+            print(f"\n[~] Received {len(data)} bytes from {addr}")
+            print(f"[<] Message content: {decoded_data}")
             
             # Step 5: Process and Forward Data (Echo for mock)
             response = f"[SERVER ECHO] {decoded_data}".encode('utf-8')
             writer.write(response)
             await writer.drain()
-            print(f"[>] Sent echo response to {addr}")
+            print(f"[>] Sent echo response ({len(response)} bytes)\n")
 
     except ConnectionResetError:
         print(f"[-] Connection closed abruptly by {addr}")

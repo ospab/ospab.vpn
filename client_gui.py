@@ -367,27 +367,40 @@ class VLESSClientGUI:
                 await self.writer.drain()
                 await asyncio.sleep(random.uniform(0.01, 0.05))
             
-            self.log(f"Отправлено {len(data)} байт", "INFO")
+            self.log(f"Отправлено {len(data)} байт, ожидание ответа...", "INFO")
             
-            # Получение ответа
-            response = await asyncio.wait_for(self.reader.read(4096), timeout=10.0)
-            
-            if response:
+            # Получение ответа (с обработкой PING/PONG)
+            while True:
+                response = await asyncio.wait_for(self.reader.read(4096), timeout=10.0)
+                
+                if not response:
+                    self.log("Соединение потеряно", "ERROR")
+                    self.connected = False
+                    self.root.after(0, self._reset_connection_ui)
+                    break
+                
+                # Обработка SERVER_PING
+                if response == b'SERVER_PING':
+                    self.log("Получен SERVER_PING, отправка PONG", "INFO")
+                    self.writer.write(b'PONG')
+                    await self.writer.drain()
+                    continue
+                
+                # Получен реальный ответ
                 response_text = response.decode('utf-8', errors='ignore')
-                self.log(f"<<< Получен ответ от сервера: {response_text}", "RECEIVE")
-            else:
-                self.log("Соединение потеряно", "ERROR")
-                self.connected = False
-                self.root.after(0, self._reset_connection_ui)
+                self.log(f"<<< Ответ сервера: {response_text}", "RECEIVE")
+                break
                 
         except asyncio.TimeoutError:
-            self.log("Таймаут ответа", "ERROR")
+            self.log("Таймаут ответа от сервера", "ERROR")
         except Exception as e:
-            self.log(f"Ошибка: {e}", "ERROR")
+            self.log(f"Ошибка отправки: {e}", "ERROR")
             self.connected = False
             self.root.after(0, self._reset_connection_ui)
         finally:
-            self.root.after(0, lambda: self.send_button.config(state=tk.NORMAL))
+            # Всегда разблокировать кнопку
+            if self.connected:
+                self.root.after(0, lambda: self.send_button.config(state=tk.NORMAL))
             
     async def _keep_alive_loop(self):
         """Периодическая отправка keep-alive PING пакетов"""
@@ -406,15 +419,25 @@ class VLESSClientGUI:
                     self.writer.write(b'PING')
                     await self.writer.drain()
                     
-                    # Ожидаем PONG
-                    pong = await asyncio.wait_for(self.reader.read(4096), timeout=10.0)
-                    if pong == b'PONG':
-                        self.log("Keep-alive PONG получен", "SUCCESS")
-                        # Вернуть статус "Подключен"
-                        self.root.after(0, lambda: self.status_label.config(text="Подключен", fg="green"))
-                    elif pong == b'SERVER_PING':
-                        self.log("Server PING получен, отправка PONG", "INFO")
-                        self.writer.write(b'PONG')
+                    # Ожидаем PONG (может прийти SERVER_PING)
+                    while True:
+                        pong = await asyncio.wait_for(self.reader.read(4096), timeout=10.0)
+                        
+                        if pong == b'PONG':
+                            self.log("Keep-alive PONG получен", "SUCCESS")
+                            # Вернуть статус "Подключен"
+                            self.root.after(0, lambda: self.status_label.config(text="Подключен", fg="green"))
+                            break
+                        elif pong == b'SERVER_PING':
+                            self.log("Server PING получен во время keep-alive, отправка PONG", "INFO")
+                            self.writer.write(b'PONG')
+                            await self.writer.drain()
+                            continue
+                        else:
+                            # Это может быть ответ на сообщение, игнорируем
+                            self.log("Получены данные во время keep-alive (не PONG)", "INFO")
+                            self.root.after(0, lambda: self.status_label.config(text="Подключен", fg="green"))
+                            break
                         await self.writer.drain()
                         self.root.after(0, lambda: self.status_label.config(text="Подключен", fg="green"))
                 except asyncio.TimeoutError:
