@@ -145,6 +145,7 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                     
                     # Send additional messages
                     additional_data = f"USER_MESSAGE: {user_input}".encode('utf-8')
+                    print(f"[>] Sending: {user_input}")
                     for i in range(0, len(additional_data), CHUNK_SIZE):
                         chunk = additional_data[i:i + CHUNK_SIZE]
                         writer.write(chunk)
@@ -154,7 +155,8 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                     # Read response
                     response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
                     if response:
-                        print(f"[+] Response: {response.decode('utf-8', errors='ignore')}")
+                        response_text = response.decode('utf-8', errors='ignore')
+                        print(f"[<] Server response: {response_text}")
                     else:
                         print("[-] Connection lost")
                         break

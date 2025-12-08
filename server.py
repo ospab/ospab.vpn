@@ -184,13 +184,16 @@ async def handle_client(reader, writer):
             # Assume data contains the destination IP/Port that needs verification
             # In a real scenario, this check happens after the VLESS command is parsed.
             
+            # Decode and display message content
+            decoded_data = data.decode('utf-8', errors='ignore')
             print(f"[~] Received {len(data)} bytes from {addr}")
+            print(f"[<] Message: {decoded_data}")
             
             # Step 5: Process and Forward Data (Echo for mock)
-            response = f"[SERVER ECHO] {data.decode('utf-8', errors='ignore')}".encode('utf-8')
+            response = f"[SERVER ECHO] {decoded_data}".encode('utf-8')
             writer.write(response)
             await writer.drain()
-            print(f"[>] Sent response to {addr}")
+            print(f"[>] Sent echo response to {addr}")
 
     except ConnectionResetError:
         print(f"[-] Connection closed abruptly by {addr}")

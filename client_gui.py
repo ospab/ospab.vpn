@@ -356,7 +356,7 @@ class VLESSClientGUI:
     async def _do_send(self, message):
         """Выполнить отправку"""
         try:
-            self.log(f"Отправка: {message}", "SEND")
+            self.log(f">>> Отправка сообщения: {message}", "SEND")
             
             data = f"USER_MESSAGE: {message}".encode('utf-8')
             
@@ -367,11 +367,14 @@ class VLESSClientGUI:
                 await self.writer.drain()
                 await asyncio.sleep(random.uniform(0.01, 0.05))
             
+            self.log(f"Отправлено {len(data)} байт", "INFO")
+            
             # Получение ответа
             response = await asyncio.wait_for(self.reader.read(4096), timeout=10.0)
             
             if response:
-                self.log(f"Ответ: {response.decode('utf-8', errors='ignore')}", "RECEIVE")
+                response_text = response.decode('utf-8', errors='ignore')
+                self.log(f"<<< Получен ответ от сервера: {response_text}", "RECEIVE")
             else:
                 self.log("Соединение потеряно", "ERROR")
                 self.connected = False
