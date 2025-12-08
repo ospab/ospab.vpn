@@ -7,12 +7,13 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
 from datetime import datetime
+import sys
 
 # --- Configuration (Configuration) ---
 SERVER_IP = '127.0.0.1'
 SERVER_PORT = 4433
 REALITY_SNI = "www.microsoft.com"
-VLESS_UUID = "12345678-1234-5678-1234-567812345678"
+VLESS_UUID = None  # Будет запрошен у пользователя
 VLESS_MAGIC_HEADER = b'\x56\x4c\x45\x53'
 CHUNK_SIZE = 50
 KEEP_ALIVE_INTERVAL = 60  # seconds
@@ -71,27 +72,30 @@ class VLESSClientGUI:
         )
         info_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        # Server
-        tk.Label(info_frame, text="Сервер:", font=("Arial", 9)).grid(row=0, column=0, sticky=tk.W, pady=2)
-        tk.Label(info_frame, text=f"{SERVER_IP}:{SERVER_PORT}", font=("Arial", 9, "bold")).grid(row=0, column=1, sticky=tk.W, pady=2)
+        # UUID Input
+        tk.Label(info_frame, text="UUID:", font=("Arial", 9)).grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.uuid_entry = tk.Entry(info_frame, font=("Arial", 9), width=40)
+        self.uuid_entry.grid(row=0, column=1, columnspan=2, sticky=tk.W, pady=2, padx=(5, 0))
         
-        # UUID
-        tk.Label(info_frame, text="UUID:", font=("Arial", 9)).grid(row=1, column=0, sticky=tk.W, pady=2)
-        tk.Label(info_frame, text=VLESS_UUID[:20] + "...", font=("Arial", 9, "bold")).grid(row=1, column=1, sticky=tk.W, pady=2)
+        # Server
+        tk.Label(info_frame, text="Сервер:", font=("Arial", 9)).grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.server_entry = tk.Entry(info_frame, font=("Arial", 9), width=20)
+        self.server_entry.insert(0, f"{SERVER_IP}:{SERVER_PORT}")
+        self.server_entry.grid(row=1, column=1, sticky=tk.W, pady=2, padx=(5, 0))
         
         # SNI
         tk.Label(info_frame, text="Reality SNI:", font=("Arial", 9)).grid(row=2, column=0, sticky=tk.W, pady=2)
-        tk.Label(info_frame, text=REALITY_SNI, font=("Arial", 9, "bold")).grid(row=2, column=1, sticky=tk.W, pady=2)
+        tk.Label(info_frame, text=REALITY_SNI, font=("Arial", 9, "bold")).grid(row=2, column=1, sticky=tk.W, pady=2, padx=(5, 0))
         
         # Status
-        tk.Label(info_frame, text="Статус:", font=("Arial", 9)).grid(row=0, column=2, sticky=tk.W, padx=(20, 0), pady=2)
+        tk.Label(info_frame, text="Статус:", font=("Arial", 9)).grid(row=1, column=2, sticky=tk.W, padx=(20, 0), pady=2)
         self.status_label = tk.Label(
             info_frame,
             text="Не подключен",
             font=("Arial", 9, "bold"),
             fg="red"
         )
-        self.status_label.grid(row=0, column=3, sticky=tk.W, pady=2)
+        self.status_label.grid(row=1, column=3, sticky=tk.W, pady=2)
         
         # --- Log Window ---
         log_frame = tk.LabelFrame(
@@ -217,6 +221,25 @@ class VLESSClientGUI:
         
     def connect(self):
         """Подключение к серверу"""
+        # Получить UUID от пользователя
+        uuid_input = self.uuid_entry.get().strip()
+        if not uuid_input:
+            messagebox.showerror("Ошибка", "Введите UUID, скопированный с сервера!")
+            return
+        
+        global VLESS_UUID, SERVER_IP, SERVER_PORT
+        VLESS_UUID = uuid_input
+        
+        # Получить сервер:порт
+        server_input = self.server_entry.get().strip()
+        if ':' in server_input:
+            try:
+                SERVER_IP, port_str = server_input.split(':', 1)
+                SERVER_PORT = int(port_str)
+            except ValueError:
+                messagebox.showerror("Ошибка", "Неверный формат сервера! Используйте IP:PORT")
+                return
+        
         self.log("Инициализация подключения...", "INFO")
         self.connect_button.config(state=tk.DISABLED)
         
@@ -267,6 +290,7 @@ class VLESSClientGUI:
             if response:
                 self.log(f"Получен ответ от сервера: {response.decode('utf-8', errors='ignore')}", "RECEIVE")
                 self.log("Подключение успешно установлено!", "SUCCESS")
+                self.log("Теперь можно отправлять сообщения для проверки соединения", "INFO")
                 
                 self.connected = True
                 
@@ -373,6 +397,9 @@ class VLESSClientGUI:
                 
                 try:
                     self.log("Отправка keep-alive PING...", "INFO")
+                    # Обновить статус на "Проверка соединения..."
+                    self.root.after(0, lambda: self.status_label.config(text="Проверка...", fg="orange"))
+                    
                     self.writer.write(b'PING')
                     await self.writer.drain()
                     
@@ -380,10 +407,13 @@ class VLESSClientGUI:
                     pong = await asyncio.wait_for(self.reader.read(4096), timeout=10.0)
                     if pong == b'PONG':
                         self.log("Keep-alive PONG получен", "SUCCESS")
+                        # Вернуть статус "Подключен"
+                        self.root.after(0, lambda: self.status_label.config(text="Подключен", fg="green"))
                     elif pong == b'SERVER_PING':
                         self.log("Server PING получен, отправка PONG", "INFO")
                         self.writer.write(b'PONG')
                         await self.writer.drain()
+                        self.root.after(0, lambda: self.status_label.config(text="Подключен", fg="green"))
                 except asyncio.TimeoutError:
                     self.log("Keep-alive timeout - соединение потеряно", "ERROR")
                     self.connected = False

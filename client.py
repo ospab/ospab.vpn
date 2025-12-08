@@ -2,13 +2,14 @@
 
 import asyncio
 import random
+import sys
 
 # --- Configuration (Configuration) ---
 SERVER_IP = '127.0.0.1' # Change to your server IP
 SERVER_PORT = 4433
 REALITY_SNI = "www.microsoft.com"
-# ВАЖНО: UUID должен совпадать с сервером!
-VLESS_UUID = "12345678-1234-5678-1234-567812345678"
+# UUID нужно скопировать с сервера или указать через аргумент командной строки
+VLESS_UUID = None
 VLESS_MAGIC_HEADER = b'\x56\x4c\x45\x53'
 # Keep-alive settings
 KEEP_ALIVE_INTERVAL = 60  # seconds 
@@ -122,12 +123,25 @@ async def send_vless_data(message: str, keep_alive: bool = False):
             # Запускаем keep-alive в фоне
             keep_alive_task = asyncio.create_task(send_keep_alive())
             
+            print("\n" + "="*60)
+            print("[~] Connection established! You can now send messages.")
+            print("[~] Type 'test' for a quick connection test")
+            print("[~] Type 'exit' to quit")
+            print("="*60)
+            
             while True:
                 try:
-                    user_input = input("\nEnter message (or 'exit' to quit): ")
+                    user_input = input("\n[Message] > ")
                     if user_input.lower() == 'exit':
                         keep_alive_task.cancel()
                         break
+                    
+                    if not user_input.strip():
+                        continue
+                    
+                    # Quick test command
+                    if user_input.lower() == 'test':
+                        user_input = f"Connection test at {asyncio.get_event_loop().time()}"
                     
                     # Send additional messages
                     additional_data = f"USER_MESSAGE: {user_input}".encode('utf-8')
@@ -164,10 +178,37 @@ async def send_vless_data(message: str, keep_alive: bool = False):
 
 
 async def main():
+    global VLESS_UUID, SERVER_IP, SERVER_PORT
+    
+    print("="*60)
     print("=== VLESS-Reality Client ===")
-    print(f"UUID: {VLESS_UUID}")
-    print(f"Target: {SERVER_IP}:{SERVER_PORT}")
-    print(f"Reality SNI: {REALITY_SNI}\n")
+    print("="*60)
+    
+    # Проверка аргументов командной строки
+    if len(sys.argv) > 1:
+        VLESS_UUID = sys.argv[1]
+    
+    if not VLESS_UUID:
+        print("\n[!] Please provide UUID from server:")
+        print("[~] (Copy from server console output)")
+        VLESS_UUID = input("UUID: ").strip()
+        
+        if not VLESS_UUID:
+            print("[-] UUID is required. Exiting.")
+            return
+    
+    # Опционально можно указать сервер и порт
+    if len(sys.argv) > 2:
+        SERVER_IP = sys.argv[2]
+    if len(sys.argv) > 3:
+        try:
+            SERVER_PORT = int(sys.argv[3])
+        except ValueError:
+            print(f"[-] Invalid port: {sys.argv[3]}. Using default {SERVER_PORT}")
+    
+    print(f"\n[~] UUID: {VLESS_UUID}")
+    print(f"[~] Target: {SERVER_IP}:{SERVER_PORT}")
+    print(f"[~] Reality SNI: {REALITY_SNI}\n")
     
     message_to_send = "Hello VLESS Server, I am requesting access to the covert channel."
     

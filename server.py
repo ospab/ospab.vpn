@@ -1,14 +1,15 @@
 # vless_reality_server.py
 
 import asyncio
+import uuid
+import sys
 
 # --- Configuration (Configuration) ---
 # Reality Configuration: Use a valid, unused TLS SNI/hostname (e.g., a CDN or large cloud provider)
 REALITY_SNI = "www.microsoft.com"
-# A secret key or UUID known only to the client and server for authentication
-# ВАЖНО: UUID должен совпадать с клиентом!
-VLESS_UUID = "12345678-1234-5678-1234-567812345678"
-# Port to listen on, typically 443 for TLS masking
+# UUID будет сгенерирован автоматически при запуске сервера
+VLESS_UUID = None
+# Port to listen on - можно указать через аргумент командной строки
 LISTEN_PORT = 4433
 # Keep-alive settings
 KEEP_ALIVE_TIMEOUT = 300  # seconds
@@ -203,16 +204,34 @@ async def handle_client(reader, writer):
 
 async def main():
     """Starts the VLESS-Reality Mock Server."""
+    global VLESS_UUID, LISTEN_PORT
+    
+    # Генерация нового UUID при каждом запуске
+    VLESS_UUID = str(uuid.uuid4())
+    
+    # Проверка аргументов командной строки для порта
+    if len(sys.argv) > 1:
+        try:
+            LISTEN_PORT = int(sys.argv[1])
+        except ValueError:
+            print(f"[-] Invalid port number: {sys.argv[1]}. Using default {LISTEN_PORT}")
+    
+    print("="*60)
     print("--- VLESS-Reality Mock Server Starting ---")
-    print(f"VLESS UUID: {VLESS_UUID}")
+    print("="*60)
+    print(f"\n[!] COPY THIS UUID TO YOUR CLIENT:")
+    print(f"\n    {VLESS_UUID}\n")
     print(f"Reality Decoy SNI: {REALITY_SNI}")
+    print(f"Listening Port: {LISTEN_PORT}")
+    print("="*60 + "\n")
     
     server = await asyncio.start_server(
         handle_client, '0.0.0.0', LISTEN_PORT
     )
     
     addrs = ', '.join(str(sock.getsockname()) for sock in server.sockets)
-    print(f"Listening on {addrs}")
+    print(f"[+] Server is ready on {addrs}")
+    print(f"[~] Press Ctrl+C to stop\n")
 
     async with server:
         await server.serve_forever()

@@ -23,7 +23,7 @@ This is a **mock implementation** of a VLESS-Reality VPN protocol designed to de
 - **Random Insertion**: Magic header is randomly inserted within the payload to complicate pattern matching
 
 ### UUID Authentication
-Both client and server must use matching UUIDs. **Fixed to `12345678-1234-5678-1234-567812345678`** for this demo - in production, these should be pre-shared secrets exchanged securely.
+**Auto-Generated UUID**: Server generates a new UUID on every startup and displays it for copying. Clients must input this UUID (via CLI arguments, interactive prompt, or GUI field). No manual file editing required - UUID is passed at runtime.
 
 ### Persistent Connection
 - **Keep-Alive Mode**: Client maintains persistent connection with 300s timeout
@@ -31,6 +31,7 @@ Both client and server must use matching UUIDs. **Fixed to `12345678-1234-5678-1
 - **Bidirectional**: Server can also send PING, client responds with PONG
 - **Interactive Mode**: After initial handshake, client can send multiple messages
 - **Timeout Handling**: Connection auto-closes on timeout, logs disconnection gracefully
+- **GUI Status Updates**: Connection status updates automatically with each keep-alive cycle
 
 ## Developer Workflows
 
@@ -38,16 +39,31 @@ Both client and server must use matching UUIDs. **Fixed to `12345678-1234-5678-1
 
 **Windows**:
 ```batch
-start_server.bat  # Terminal 1
-start_client.bat  # Terminal 2
+start_server.bat  # Terminal 1 - displays UUID for copying
+start_client.bat  # Terminal 2 - prompts for UUID
 REM or
-start_client_gui.bat  # GUI version
+start_client_gui.bat  # GUI version - paste UUID in GUI field
 ```
 
 **Linux** (requires root):
 ```bash
-sudo ./start_server.sh  # Terminal 1
-sudo ./start_client.sh  # Terminal 2
+sudo ./start_server.sh  # Terminal 1 - displays UUID for copying
+sudo ./start_client.sh  # Terminal 2 - prompts for UUID
+# or
+sudo ./start_client_gui.sh  # GUI version - paste UUID in GUI field
+```
+
+**Server with custom port**:
+```bash
+python server.py 443  # Windows/Linux - specify port as argument
+```
+
+**Client with UUID**:
+```bash
+python client.py UUID [SERVER_IP] [PORT]  # All arguments optional except UUID
+```
+
+Linux scripts automatically install Python3, pip, and tkinter if missing.
 # or
 sudo ./start_client_gui.sh  # GUI version
 ```
@@ -83,9 +99,9 @@ Should receive `HTTP/1.1 404 Not Found`.
 ## Configuration Constants
 
 All configuration is at the top of each file:
-- `SERVER_IP`/`SERVER_PORT` - Connection endpoint (default: 127.0.0.1:4433)
+- `SERVER_IP`/`SERVER_PORT` - Connection endpoint (default: 127.0.0.1:4433, configurable via CLI)
 - `REALITY_SNI` - SNI to impersonate (must match on client/server)
-- `VLESS_UUID` - Authentication token (must match on client/server)
+- `VLESS_UUID` - Auto-generated on server startup (None in source, set at runtime)
 - `VLESS_MAGIC_HEADER` - Protocol identifier (b'\x56\x4c\x45\x53')
 - `CHUNK_SIZE` - Traffic splitting size (50 bytes in client)
 
@@ -100,7 +116,7 @@ All configuration is at the top of each file:
 
 This is an **educational mock** - not production-ready:
 1. TLS handshake is simplified (real implementations need full TLS 1.3 mimicry)
-2. UUID is hardcoded (should be generated and exchanged securely)
+2. UUID is auto-generated (for production, should use secure pre-shared keys)
 3. No actual traffic forwarding (server echoes data back)
 4. No encryption beyond the mock Reality layer
 5. Whitelist/destination checks are placeholders
