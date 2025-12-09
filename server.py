@@ -220,17 +220,30 @@ async def handle_client(reader, writer):
                 last_ping_time = current_time
             
             # Decode and display message content
-            decoded_data = data.decode('utf-8', errors='ignore')
-            logger.info(f"Received {len(data)} bytes from {addr}")
-            logger.info(f"Message content: {decoded_data}")
+            decoded_data = data.decode('utf-8', errors='ignore').strip()
+            logger.info(f"Received from {addr}: {decoded_data}")
             
-            # Step 5: Process and Forward Data (Echo for mock)
-            response_text = f"[SERVER ECHO] {decoded_data}"
+            # Command Handling
+            if decoded_data == "/help":
+                response_text = (
+                    "--- Server Commands ---\n"
+                    "/help            - Show this help message\n"
+                    "/message <text>  - Send a logged message to admin\n"
+                    "Any other text   - Echo back"
+                )
+            elif decoded_data.startswith("/message "):
+                msg_content = decoded_data[9:]
+                logger.info(f"!!! USER MESSAGE from {addr}: {msg_content}")
+                response_text = f"Server received: {msg_content}"
+            else:
+                # Step 5: Process and Forward Data (Echo for mock)
+                response_text = f"[SERVER ECHO] {decoded_data}"
+            
             encrypted_response = cipher.encrypt(response_text.encode('utf-8'))
             
             writer.write(encrypted_response)
             await writer.drain()
-            logger.info(f"Sent echo response ({len(encrypted_response)} bytes)")
+            logger.info(f"Sent response ({len(encrypted_response)} bytes)")
 
     except ConnectionResetError:
         logger.warning(f"Connection closed abruptly by {addr}")

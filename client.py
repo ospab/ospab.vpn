@@ -144,121 +144,91 @@ async def send_vless_data(message: str, keep_alive: bool = False):
         await writer.drain()
         
         # Step 3: Send actual VLESS data (Encrypted)
-        vless_data = f"VLESS_COMMAND_CONNECT_TO_DEST: {message}".encode('utf-8')
-        encrypted_vless_data = cipher.encrypt(vless_data)
+        # vless_data = f"VLESS_COMMAND_CONNECT_TO_DEST: {message}".encode('utf-8')
+        # encrypted_vless_data = cipher.encrypt(vless_data)
         
         # --- VLESS Enhancement: Traffic Splitting for DPI Evasion ---
         CHUNK_SIZE = 50 
         
-        logger.info(f"Sending Encrypted VLESS data in chunks (Size: {len(encrypted_vless_data)})")
+        # logger.info(f"Sending Encrypted VLESS data in chunks (Size: {len(encrypted_vless_data)})")
         
-        for i in range(0, len(encrypted_vless_data), CHUNK_SIZE):
-            chunk = encrypted_vless_data[i:i + CHUNK_SIZE]
-            writer.write(chunk)
-            await writer.drain()
-            await asyncio.sleep(random.uniform(0.01, 0.05)) 
+        # for i in range(0, len(encrypted_vless_data), CHUNK_SIZE):
+        #     chunk = encrypted_vless_data[i:i + CHUNK_SIZE]
+        #     writer.write(chunk)
+        #     await writer.drain()
+        #     await asyncio.sleep(random.uniform(0.01, 0.05)) 
 
         # Step 4: Read response from the server (Encrypted)
-        encrypted_response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
+        # encrypted_response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
         
-        if encrypted_response:
-            response = cipher.decrypt(encrypted_response)
-            logger.info(f"Server Response Received:\n{response.decode('utf-8', errors='ignore')}")
-        else:
-            logger.warning("No response received (Server might have acted as Decoy or closed connection).")
+        # if encrypted_response:
+        #     response = cipher.decrypt(encrypted_response)
+        #     logger.info(f"Server Response Received:\n{response.decode('utf-8', errors='ignore')}")
+        # else:
+        #     logger.warning("No response received (Server might have acted as Decoy or closed connection).")
         
         # Step 5: Keep connection alive if requested
         if keep_alive:
-            logger.info("Maintaining persistent connection with keep-alive...")
+            logger.info("Maintaining persistent connection...")
             
+            # Background Keep-Alive Task
             async def send_keep_alive():
-                """Периодически отправлять PING для поддержания соединения"""
                 while True:
                     await asyncio.sleep(KEEP_ALIVE_INTERVAL)
                     try:
-                        logger.debug("Sending keep-alive PING...")
+                        # logger.debug("Sending keep-alive PING...")
                         writer.write(cipher.encrypt(b'PING'))
                         await writer.drain()
-                        
-                        # Ожидаем PONG
-                        encrypted_pong = await asyncio.wait_for(reader.read(4096), timeout=10.0)
-                        pong = cipher.decrypt(encrypted_pong)
-                        
-                        if pong == b'PONG':
-                            logger.debug("Keep-alive PONG received")
-                        elif pong == b'SERVER_PING':
-                            logger.debug("Server PING received, sending PONG")
-                            writer.write(cipher.encrypt(b'PONG'))
-                            await writer.drain()
-                    except asyncio.TimeoutError:
-                        logger.warning("Keep-alive timeout")
-                        break
-                    except Exception as e:
-                        logger.error(f"Keep-alive error: {e}")
+                    except Exception:
                         break
             
-            # Запускаем keep-alive в фоне
             keep_alive_task = asyncio.create_task(send_keep_alive())
             
             print("\n" + "="*60)
-            print("[~] Connection established! You can now send messages.")
-            print("[~] Type 'test' for a quick connection test")
-            print("[~] Type 'exit' to quit")
+            print("[~] Connection established!")
+            print("[~] Type '/help' for commands, '/message <text>' to send msg, 'exit' to quit")
             print("="*60)
             
+            # Interactive Loop
             while True:
                 try:
-                    user_input = input("\n[Message] > ")
+                    # Use run_in_executor to avoid blocking asyncio loop with input()
+                    user_input = await asyncio.get_event_loop().run_in_executor(None, input, "\nclient> ")
+                    user_input = user_input.strip()
+                    
+                    if not user_input:
+                        continue
+                        
                     if user_input.lower() == 'exit':
                         keep_alive_task.cancel()
                         break
                     
-                    if not user_input.strip():
-                        continue
+                    # Encrypt and Send
+                    encrypted_msg = cipher.encrypt(user_input.encode('utf-8'))
+                    writer.write(encrypted_msg)
+                    await writer.drain()
                     
-                    # Quick test command
-                    if user_input.lower() == 'test':
-                        user_input = f"Connection test at {asyncio.get_event_loop().time()}"
-                    
-                    # Send additional messages
-                    additional_data = f"USER_MESSAGE: {user_input}".encode('utf-8')
-                    encrypted_additional_data = cipher.encrypt(additional_data)
-                    
-                    logger.info(f"Sending: {user_input}")
-                    for i in range(0, len(encrypted_additional_data), CHUNK_SIZE):
-                        chunk = encrypted_additional_data[i:i + CHUNK_SIZE]
-                        writer.write(chunk)
-                        await writer.drain()
-                        await asyncio.sleep(random.uniform(0.01, 0.05))
-                    
-                    logger.info(f"Sent {len(encrypted_additional_data)} bytes, waiting for response...")
-                    
-                    # Read response (with loop to handle PING/PONG)
+                    # Wait for Response
+                    # Note: In a real app, reading should be in a separate task to handle async PINGs/Messages
+                    # Here we do a simple blocking read for demonstration
                     while True:
-                        encrypted_response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
-                        if not encrypted_response:
-                            logger.warning("Connection lost")
-                            break
-                        
+                        encrypted_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
                         response = cipher.decrypt(encrypted_response)
                         
-                        # Handle server PING
+                        if response == b'PONG':
+                            continue # Ignore keep-alive pong
                         if response == b'SERVER_PING':
-                            logger.debug("Received SERVER_PING, sending PONG")
                             writer.write(cipher.encrypt(b'PONG'))
                             await writer.drain()
                             continue
-                        
-                        # Got actual response
-                        response_text = response.decode('utf-8', errors='ignore')
-                        logger.info(f"Server response: {response_text}\n")
+                            
+                        print(f"Server: {response.decode('utf-8', errors='ignore')}")
                         break
                         
                 except asyncio.TimeoutError:
-                    logger.warning("Response timeout")
-                    break
-                except EOFError:
-                    print("\n[!] Input interrupted")
+                    print("[-] Timeout waiting for response")
+                except Exception as e:
+                    print(f"[-] Error: {e}")
                     break
 
     except ConnectionRefusedError:

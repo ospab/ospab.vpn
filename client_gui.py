@@ -427,7 +427,8 @@ class ModernVLESSClient:
 
     async def _async_send(self, msg):
         try:
-            data = f"MSG:{msg}".encode()
+            # data = f"MSG:{msg}".encode() # Old format
+            data = msg.encode() # New format: Send raw command/text
             encrypted = self.cipher.encrypt(data)
             
             # Traffic Splitting
