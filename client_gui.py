@@ -158,7 +158,20 @@ class ModernVLESSClient:
             pady=5,
             command=self.toggle_connection
         )
-        self.btn_connect.pack(side=tk.LEFT)
+        self.btn_connect.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.btn_link = tk.Button(
+            action_frame, 
+            text="GET LINK", 
+            bg="#2d2d2d", 
+            fg="white", 
+            font=self.font_bold,
+            relief="flat",
+            padx=15,
+            pady=5,
+            command=self.generate_link
+        )
+        self.btn_link.pack(side=tk.LEFT)
 
         # 4. Terminal/Log
         log_frame = tk.LabelFrame(
@@ -224,6 +237,37 @@ class ModernVLESSClient:
         self.log_area.see(tk.END)
         self.log_area.config(state='disabled')
 
+    def generate_link(self):
+        uuid = self.entry_uuid.get().strip()
+        server = self.entry_server.get().strip()
+        sni = self.entry_sni.get().strip()
+        
+        if not uuid or not server:
+            messagebox.showerror("Error", "UUID and Server Address required!")
+            return
+            
+        try:
+            ip, port = server.split(':')
+        except ValueError:
+            messagebox.showerror("Error", "Invalid Server Address")
+            return
+
+        # Generate standard VLESS-Reality link (for Nekobox/v2rayNG)
+        # Format: vless://uuid@ip:port?security=reality&sni=sni&fp=chrome&type=tcp&headerType=none#Alias
+        link = f"vless://{uuid}@{ip}:{port}?security=reality&sni={sni}&fp=chrome&type=tcp&headerType=none&flow=xtls-rprx-vision#VLESS-Reality-Olympiad"
+        
+        self.root.clipboard_clear()
+        self.root.clipboard_append(link)
+        self.root.update()
+        
+        messagebox.showinfo("Link Generated", 
+            "VLESS Link copied to clipboard!\n\n"
+            "NOTE: This link is for standard clients (Nekobox, v2rayNG).\n"
+            "However, this server uses a CUSTOM encryption protocol for the Olympiad.\n"
+            "Standard clients will NOT connect unless the server is reverted to standard Xray-core."
+        )
+        self.log("Generated VLESS link (copied to clipboard)", "SYSTEM")
+
     def toggle_connection(self):
         if not self.connected:
             self.connect()
@@ -259,7 +303,11 @@ class ModernVLESSClient:
 
     async def _async_connect_logic(self, ip, port, uuid):
         try:
-            self.reader, self.writer = await asyncio.open_connection(ip, port)
+            # Connection with timeout
+            self.reader, self.writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port),
+                timeout=5.0
+            )
             
             # 1. Crypto Handshake
             nonce = os.urandom(16)
@@ -288,8 +336,17 @@ class ModernVLESSClient:
             self.keep_alive_task = asyncio.create_task(self._keep_alive())
             self.reader_task = asyncio.create_task(self._reader_loop())
 
+        except asyncio.TimeoutError:
+            self.log("Connection Timed Out. Check Server Firewall/Port.", "ERROR")
+            self._set_connected(False)
+            self.loop.stop()
         except Exception as e:
-            self.log(f"Connection Failed: {str(e)}", "ERROR")
+            err_msg = str(e)
+            if "WinError 121" in err_msg:
+                self.log("Error: Semaphore Timeout. Port likely blocked.", "ERROR")
+                self.log("Hint: Run 'ufw allow 4433/tcp' on server.", "SYSTEM")
+            else:
+                self.log(f"Connection Failed: {err_msg}", "ERROR")
             self._set_connected(False)
             self.loop.stop()
 

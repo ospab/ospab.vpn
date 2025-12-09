@@ -18,6 +18,41 @@ VLESS_MAGIC_HEADER = b'\x56\x4c\x45\x53'
 # Keep-alive settings
 KEEP_ALIVE_INTERVAL = 60  # seconds 
 
+# --- Interactive Setup ---
+def configure_client():
+    global SERVER_IP, SERVER_PORT, REALITY_SNI, VLESS_UUID
+    
+    print("\n--- Client Configuration ---")
+    
+    # Server IP
+    ip_in = input(f"Server IP [{SERVER_IP}]: ").strip()
+    if ip_in:
+        SERVER_IP = ip_in
+        
+    # Server Port
+    p_in = input(f"Server Port [{SERVER_PORT}]: ").strip()
+    if p_in.isdigit():
+        SERVER_PORT = int(p_in)
+        
+    # UUID
+    if len(sys.argv) > 1:
+        VLESS_UUID = sys.argv[1]
+    
+    if not VLESS_UUID:
+        u_in = input("VLESS UUID (Required): ").strip()
+        if u_in:
+            VLESS_UUID = u_in
+        else:
+            print("[!] Error: UUID is required!")
+            sys.exit(1)
+            
+    # SNI
+    s_in = input(f"Reality SNI [{REALITY_SNI}]: ").strip()
+    if s_in:
+        REALITY_SNI = s_in
+        
+    print("\n[~] Configuration applied.")
+
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
@@ -238,45 +273,18 @@ async def send_vless_data(message: str, keep_alive: bool = False):
 
 
 async def main():
-    global VLESS_UUID, SERVER_IP, SERVER_PORT
+    configure_client()
     
     print("="*60)
     print("=== VLESS-Reality Client ===")
+    print(f"Target: {SERVER_IP}:{SERVER_PORT}")
+    print(f"SNI:    {REALITY_SNI}")
     print("="*60)
     
-    # Проверка аргументов командной строки
-    if len(sys.argv) > 1:
-        VLESS_UUID = sys.argv[1]
-    
-    if not VLESS_UUID:
-        print("\n[!] Please provide UUID from server:")
-        print("[~] (Copy from server console output)")
-        VLESS_UUID = input("UUID: ").strip()
-        
-        if not VLESS_UUID:
-            print("[-] UUID is required. Exiting.")
-            return
-    
-    # Опционально можно указать сервер и порт
-    if len(sys.argv) > 2:
-        SERVER_IP = sys.argv[2]
-    if len(sys.argv) > 3:
-        try:
-            SERVER_PORT = int(sys.argv[3])
-        except ValueError:
-            print(f"[-] Invalid port: {sys.argv[3]}. Using default {SERVER_PORT}")
-    
-    print(f"\n[~] UUID: {VLESS_UUID}")
-    print(f"[~] Target: {SERVER_IP}:{SERVER_PORT}")
-    print(f"[~] Reality SNI: {REALITY_SNI}\n")
-    
-    message_to_send = "Hello VLESS Server, I am requesting access to the covert channel."
-    
-    # Для демонстрации на олимпиаде - включаем keep-alive
-    await send_vless_data(message_to_send, keep_alive=True)
+    await send_vless_data("Initial Handshake", keep_alive=True)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nClient stopped manually.")
+        print("\n[!] Client stopped manually.")
