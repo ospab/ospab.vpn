@@ -6,12 +6,13 @@ import sys
 import hashlib
 import time
 import logging
+import os
 
 # --- Configuration (Configuration) ---
 # Reality Configuration: Use a valid, unused TLS SNI/hostname (e.g., a CDN or large cloud provider)
 REALITY_SNI = "www.microsoft.com"
-# UUID будет сгенерирован автоматически при запуске сервера
-VLESS_UUID = None
+# UUID: Load from Env Var, Arg, or Generate Random
+VLESS_UUID = os.environ.get('VLESS_UUID')
 # Port to listen on - можно указать через аргумент командной строки
 LISTEN_PORT = 4433
 # Keep-alive settings
@@ -243,8 +244,12 @@ async def main():
     """Starts the VLESS-Reality Mock Server."""
     global VLESS_UUID, LISTEN_PORT
     
-    # Генерация нового UUID при каждом запуске
-    VLESS_UUID = str(uuid.uuid4())
+    # Load UUID from Env or Generate
+    if not VLESS_UUID:
+        VLESS_UUID = str(uuid.uuid4())
+        uuid_source = "Generated (Random)"
+    else:
+        uuid_source = "Environment Variable"
     
     # Проверка аргументов командной строки для порта
     if len(sys.argv) > 1:
@@ -256,7 +261,7 @@ async def main():
     print("="*60)
     print("--- VLESS-Reality Mock Server Starting ---")
     print("="*60)
-    print(f"\n[!] COPY THIS UUID TO YOUR CLIENT:")
+    print(f"\n[!] SERVER UUID ({uuid_source}):")
     print(f"\n    {VLESS_UUID}\n")
     print(f"Reality Decoy SNI: {REALITY_SNI}")
     print(f"Listening Port: {LISTEN_PORT}")

@@ -44,19 +44,11 @@ echo ""
 
 # Check UUID
 echo "[3/6] Checking UUID configuration..."
-UUID=$(grep "VLESS_UUID = " server.py | cut -d'"' -f2)
-if [ "$UUID" == "12345678-1234-5678-1234-567812345678" ]; then
-    echo "[WARNING] Using default UUID!"
-    echo "          Generate new: python3 -c \"import uuid; print(uuid.uuid4())\""
-    echo "          Edit server.py and client.py with new UUID"
-    read -p "Continue anyway? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-else
-    echo "[OK] Custom UUID detected: ${UUID:0:20}..."
-fi
+# Generate a new UUID if not provided
+NEW_UUID=$(python3 -c "import uuid; print(uuid.uuid4())")
+echo "export VLESS_UUID=${NEW_UUID}" >> /etc/environment
+echo "[OK] Generated new UUID: ${NEW_UUID}"
+echo "     Saved to /etc/environment"
 echo ""
 
 # Create systemd service
@@ -70,6 +62,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$(pwd)
+Environment="VLESS_UUID=${NEW_UUID}"
 ExecStart=/usr/bin/python3 $(pwd)/server.py
 Restart=always
 RestartSec=10
