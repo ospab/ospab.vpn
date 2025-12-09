@@ -215,9 +215,97 @@ async def send_vless_data(message: str, keep_alive: bool = False):
 
             read_task = asyncio.create_task(read_loop())
             
+            # Proxy Simulation Task
+            proxy_task = None
+            
+            async def run_proxy_simulation():
+                print("\n[PROXY] Starting traffic simulation...")
+                urls = [
+                    "https://www.google.com/search?q=vless",
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    "https://api.twitter.com/1.1/statuses/update.json",
+                    "https://www.github.com/ospab/vpn",
+                    "https://aws.amazon.com/ec2/pricing"
+                ]
+                try:
+                    while True:
+                        url = random.choice(urls)
+                        method = "GET" if "api" not in url else "POST"
+                        req = f"{method} {url} HTTP/1.1\r\nHost: {url.split('/')[2]}\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
+                        
+                        print(f"[PROXY] Tunneling: {method} {url}")
+                        encrypted_req = cipher.encrypt(req.encode('utf-8'))
+                        writer.write(encrypted_req)
+                        await writer.drain()
+                        
+                        await asyncio.sleep(random.uniform(1.5, 4.0))
+                except asyncio.CancelledError:
+                    print("\n[PROXY] Traffic simulation stopped.")
+
+            # --- Local Proxy Listener (Real Traffic) ---
+            async def handle_local_proxy(local_reader, local_writer):
+                try:
+                    # Read request from browser/system
+                    data = await local_reader.read(4096)
+                    if not data: return
+                    
+                    # Encrypt and forward to VLESS tunnel
+                    # Note: In a real implementation, we need a separate VLESS stream per connection.
+                    # Here we are multiplexing everything into ONE tunnel, which is messy but demonstrates the concept.
+                    # The server will see mixed packets if multiple requests happen.
+                    # For this mock, we assume sequential requests or just fire-and-forget.
+                    
+                    encrypted_req = cipher.encrypt(data)
+                    writer.write(encrypted_req)
+                    await writer.drain()
+                    
+                    # We can't easily route the response back to the specific local_writer 
+                    # because the main read_loop consumes all server responses.
+                    # This is the limitation of this simple single-socket tunnel.
+                    # But the server WILL execute the request.
+                    
+                    local_writer.close()
+                except Exception as e:
+                    print(f"Local Proxy Error: {e}")
+
+            local_proxy_server = None
+
+            async def start_local_proxy():
+                nonlocal local_proxy_server
+                local_proxy_server = await asyncio.start_server(handle_local_proxy, '127.0.0.1', 10808)
+                print(f"\n[SYSTEM PROXY] Listening on 127.0.0.1:10808")
+                
+                # Set Windows Proxy
+                if sys.platform == "win32":
+                    import winreg
+                    try:
+                        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_ALL_ACCESS)
+                        winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, "127.0.0.1:10808")
+                        winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+                        winreg.CloseKey(key)
+                        print("[SYSTEM PROXY] Windows Proxy Settings ENABLED")
+                        os.system("inetcpl.cpl ,4") # Optional: Open settings to refresh
+                    except Exception as e:
+                        print(f"[!] Failed to set Windows Proxy: {e}")
+
+            def stop_local_proxy():
+                if local_proxy_server:
+                    local_proxy_server.close()
+                
+                # Disable Windows Proxy
+                if sys.platform == "win32":
+                    import winreg
+                    try:
+                        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_ALL_ACCESS)
+                        winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+                        winreg.CloseKey(key)
+                        print("[SYSTEM PROXY] Windows Proxy Settings DISABLED")
+                    except Exception:
+                        pass
+
             print("\n" + "="*60)
             print("[~] Connection established!")
-            print("[~] Type '/help' for commands, '/message <text>' to send msg, 'exit' to quit")
+            print("[~] Type '/help', '/proxy' (sim), '/global' (system proxy), 'exit'")
             print("="*60)
             
             # Interactive Loop
@@ -231,10 +319,28 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                         continue
                         
                     if user_input.lower() == 'exit':
+                        stop_local_proxy()
+                        if proxy_task: proxy_task.cancel()
                         keep_alive_task.cancel()
                         read_task.cancel()
                         break
                     
+                    if user_input.lower() == '/proxy':
+                        if proxy_task and not proxy_task.done():
+                            proxy_task.cancel()
+                            proxy_task = None
+                        else:
+                            proxy_task = asyncio.create_task(run_proxy_simulation())
+                        continue
+
+                    if user_input.lower() == '/global':
+                        if local_proxy_server:
+                            stop_local_proxy()
+                            local_proxy_server = None
+                        else:
+                            await start_local_proxy()
+                        continue
+
                     # Encrypt and Send
                     encrypted_msg = cipher.encrypt(user_input.encode('utf-8'))
                     writer.write(encrypted_msg)

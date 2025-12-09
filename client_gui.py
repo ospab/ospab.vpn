@@ -10,6 +10,7 @@ import threading
 from datetime import datetime
 import hashlib
 import os
+import sys
 
 # --- Configuration Defaults ---
 DEFAULT_SERVER_IP = '127.0.0.1'
@@ -71,6 +72,8 @@ class ModernVLESSClient:
         self.cipher = None
         self.keep_alive_task = None
         self.reader_task = None
+        self.proxy_task = None
+        self.local_proxy_server = None
         
         self._setup_styles()
         self._build_ui()
@@ -206,18 +209,39 @@ class ModernVLESSClient:
         input_frame = ttk.Frame(main_frame)
         input_frame.pack(fill=tk.X, pady=(10, 0))
 
-        self.entry_message = tk.Entry(
+        # Instruction Label
+        tk.Label(
             input_frame, 
+            text="Command Input (/help, /proxy, /global, /message <text>):", 
+            bg="#1e1e1e", 
+            fg="#888888", 
+            font=("Segoe UI", 8)
+        ).pack(anchor="w", pady=(0, 2))
+
+        input_inner_frame = ttk.Frame(input_frame)
+        input_inner_frame.pack(fill=tk.X)
+
+        # Prompt Label
+        tk.Label(
+            input_inner_frame, 
+            text=">", 
+            bg="#1e1e1e", 
+            fg="#007acc", 
+            font=self.font_bold
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        self.entry_message = tk.Entry(
+            input_inner_frame, 
             bg="#3c3c3c", 
             fg="white", 
             insertbackground="white", 
-            font=self.font_main
+            font=self.font_mono
         )
         self.entry_message.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         self.entry_message.bind("<Return>", lambda e: self.send_message())
 
         self.btn_send = tk.Button(
-            input_frame,
+            input_inner_frame,
             text="SEND",
             bg="#2d2d2d",
             fg="white",
@@ -409,6 +433,11 @@ class ModernVLESSClient:
     def disconnect(self):
         self.log("Disconnecting...", "SYSTEM")
         self.connected = False # This will stop loops
+        
+        # Stop System Proxy if active
+        if self.local_proxy_server:
+            self._stop_system_proxy()
+            
         if self.writer:
             try:
                 self.writer.close()
@@ -423,7 +452,117 @@ class ModernVLESSClient:
             return
         
         self.entry_message.delete(0, tk.END)
-        asyncio.run_coroutine_threadsafe(self._async_send(msg), self.loop)
+        self.log(f"> {msg}", "SEND")
+        
+        if msg.lower() == "/proxy":
+            self._toggle_proxy()
+        elif msg.lower() == "/global":
+            self._toggle_system_proxy()
+        else:
+            asyncio.run_coroutine_threadsafe(self._async_send(msg), self.loop)
+
+    def _toggle_proxy(self):
+        if hasattr(self, 'proxy_task') and self.proxy_task and not self.proxy_task.done():
+            self.proxy_task.cancel()
+            self.log("[PROXY] Traffic simulation stopped.", "SYSTEM")
+        else:
+            self.proxy_task = asyncio.run_coroutine_threadsafe(self._run_proxy_simulation(), self.loop)
+            self.log("[PROXY] Starting traffic simulation...", "SYSTEM")
+
+    def _toggle_system_proxy(self):
+        if self.local_proxy_server:
+            self._stop_system_proxy()
+        else:
+            asyncio.run_coroutine_threadsafe(self._start_system_proxy(), self.loop)
+
+    async def _start_system_proxy(self):
+        try:
+            self.local_proxy_server = await asyncio.start_server(
+                self._handle_local_proxy_connection, '127.0.0.1', 10808
+            )
+            self.log("[SYSTEM PROXY] Listening on 127.0.0.1:10808", "SYSTEM")
+            
+            # Set Windows Proxy
+            if sys.platform == "win32":
+                import winreg
+                try:
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_ALL_ACCESS)
+                    winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, "127.0.0.1:10808")
+                    winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+                    winreg.CloseKey(key)
+                    self.log("[SYSTEM PROXY] Windows Proxy Settings ENABLED", "SUCCESS")
+                    os.system("inetcpl.cpl ,4") # Optional: Open settings to refresh
+                except Exception as e:
+                    self.log(f"[!] Failed to set Windows Proxy: {e}", "ERROR")
+        except Exception as e:
+            self.log(f"Failed to start local proxy: {e}", "ERROR")
+
+    def _stop_system_proxy(self):
+        if self.local_proxy_server:
+            self.local_proxy_server.close()
+            self.local_proxy_server = None
+            
+        # Disable Windows Proxy
+        if sys.platform == "win32":
+            import winreg
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_ALL_ACCESS)
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+                winreg.CloseKey(key)
+                self.log("[SYSTEM PROXY] Windows Proxy Settings DISABLED", "SYSTEM")
+            except Exception:
+                pass
+
+    async def _handle_local_proxy_connection(self, local_reader, local_writer):
+        try:
+            # Read request from browser/system
+            data = await local_reader.read(4096)
+            if not data: return
+            
+            # Encrypt and forward to VLESS tunnel
+            # Note: In a real implementation, we need a separate VLESS stream per connection.
+            # Here we are multiplexing everything into ONE tunnel, which is messy but demonstrates the concept.
+            
+            encrypted_req = self.cipher.encrypt(data)
+            self.writer.write(encrypted_req)
+            await self.writer.drain()
+            
+            # We can't easily route the response back to the specific local_writer 
+            # because the main read_loop consumes all server responses.
+            # This is the limitation of this simple single-socket tunnel.
+            
+            local_writer.close()
+        except Exception as e:
+            # self.log(f"Local Proxy Error: {e}", "ERROR")
+            pass
+
+    async def _run_proxy_simulation(self):
+        urls = [
+            "https://www.google.com/search?q=vless",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://api.twitter.com/1.1/statuses/update.json",
+            "https://www.github.com/ospab/ospab.vpn",
+            "https://aws.amazon.com/ec2/pricing"
+        ]
+        try:
+            while self.connected:
+                url = random.choice(urls)
+                method = "GET" if "api" not in url else "POST"
+                req = f"{method} {url} HTTP/1.1\r\nHost: {url.split('/')[2]}\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
+                
+                # Send directly via writer (thread-safe because we are in async loop)
+                encrypted_req = self.cipher.encrypt(req.encode('utf-8'))
+                self.writer.write(encrypted_req)
+                await self.writer.drain()
+                
+                # Log to GUI (thread-safe call)
+                self.root.after(0, lambda u=url: self.log(f"[PROXY] Tunneling: {u}", "ENCRYPT"))
+                
+                await asyncio.sleep(random.uniform(1.5, 4.0))
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.root.after(0, lambda err=e: self.log(f"[PROXY] Error: {err}", "ERROR"))
 
     async def _async_send(self, msg):
         try:
@@ -437,7 +576,7 @@ class ModernVLESSClient:
                 await self.writer.drain()
                 await asyncio.sleep(0.01)
             
-            self.log(f"Sent: {msg}", "SEND")
+            # Log handled in send_message for immediate feedback
             
         except Exception as e:
             self.log(f"Send Error: {e}", "ERROR")

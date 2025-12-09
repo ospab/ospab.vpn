@@ -16,22 +16,20 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # Install dependencies
-echo "[1/6] Installing dependencies..."
+echo "[1/5] Installing dependencies..."
 if command -v apt-get &> /dev/null; then
     apt-get update
-    apt-get install -y python3 python3-pip ufw fail2ban
+    apt-get install -y python3 python3-pip fail2ban
 elif command -v yum &> /dev/null; then
-    yum install -y python3 python3-pip firewalld fail2ban
+    yum install -y python3 python3-pip fail2ban
 elif command -v dnf &> /dev/null; then
-    dnf install -y python3 python3-pip firewalld fail2ban
+    dnf install -y python3 python3-pip fail2ban
 fi
 echo "[OK] Dependencies installed"
 echo ""
 
-
-
 # Check UUID
-echo "[3/6] Checking UUID configuration..."
+echo "[2/5] Checking UUID configuration..."
 # Generate a new UUID if not provided
 NEW_UUID=$(python3 -c "import uuid; print(uuid.uuid4())")
 echo "export VLESS_UUID=${NEW_UUID}" >> /etc/environment
@@ -40,7 +38,7 @@ echo "     Saved to /etc/environment"
 echo ""
 
 # Create systemd service
-echo "[4/6] Creating systemd service..."
+echo "[3/5] Creating systemd service..."
 cat > /etc/systemd/system/vless-reality.service << EOF
 [Unit]
 Description=VLESS-Reality VPN Server
@@ -67,7 +65,7 @@ echo "[OK] Systemd service created"
 echo ""
 
 # Test server
-echo "[5/6] Testing server configuration..."
+echo "[4/5] Testing server configuration..."
 python3 -c "import asyncio" || {
     echo "[ERROR] Python asyncio not available"
     exit 1
@@ -76,7 +74,7 @@ echo "[OK] Python configuration valid"
 echo ""
 
 # Start service
-echo "[6/6] Starting VLESS-Reality service..."
+echo "[5/5] Starting VLESS-Reality service..."
 systemctl start vless-reality
 sleep 2
 systemctl status vless-reality --no-pager

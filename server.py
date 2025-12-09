@@ -9,6 +9,7 @@ import time
 import logging
 import os
 import socket
+import random
 
 # --- Configuration (Configuration) ---
 # Reality Configuration: Use a valid, unused TLS SNI/hostname (e.g., a CDN or large cloud provider)
@@ -243,6 +244,104 @@ async def handle_client(reader, writer):
                     msg_content = decoded_data[9:]
                     logger.info(f"!!! USER MESSAGE from {addr}: {msg_content}")
                     response_text = f"Server received: {msg_content}"
+                elif decoded_data.startswith(("GET ", "POST ", "CONNECT ", "HEAD ", "PUT ", "DELETE ", "OPTIONS ")):
+                    # --- Real Proxy Behavior ---
+                    try:
+                        target_host = None
+                        target_port = 80
+                        
+                        # Parse Target
+                        lines = decoded_data.split('\n')
+                        req_line = lines[0].strip()
+                        method, url, _ = req_line.split(' ', 2)
+                        
+                        if method == 'CONNECT':
+                            # HTTPS Tunnel: CONNECT host:port HTTP/1.1
+                            target_host, target_port_str = url.split(':')
+                            target_port = int(target_port_str)
+                        else:
+                            # HTTP Proxy: GET http://host/path HTTP/1.1
+                            # Extract Host from headers or URL
+                            if '://' in url:
+                                from urllib.parse import urlparse
+                                parsed = urlparse(url)
+                                target_host = parsed.hostname
+                                target_port = parsed.port or 80
+                            else:
+                                # Look for Host header
+                                for line in lines:
+                                    if line.lower().startswith('host:'):
+                                        target_host = line.split(':', 1)[1].strip()
+                                        if ':' in target_host:
+                                            target_host, p = target_host.split(':')
+                                            target_port = int(p)
+                                        break
+                        
+                        if not target_host:
+                            raise ValueError("Could not determine target host")
+
+                        logger.info(f"[PROXY] Tunneling to {target_host}:{target_port}")
+                        
+                        # Connect to Target
+                        remote_reader, remote_writer = await asyncio.open_connection(target_host, target_port)
+                        
+                        # If CONNECT, send 200 OK to client first
+                        if method == 'CONNECT':
+                            writer.write(cipher.encrypt(b'HTTP/1.1 200 Connection Established\r\n\r\n'))
+                            await writer.drain()
+                        else:
+                            # For HTTP, forward the original request
+                            remote_writer.write(decoded_data.encode('utf-8'))
+                            await remote_writer.drain()
+                            
+                        # --- Bidirectional Pipe ---
+                        async def pipe(r, w, encrypt=False):
+                            try:
+                                while True:
+                                    data = await r.read(4096)
+                                    if not data: break
+                                    if encrypt:
+                                        w.write(cipher.encrypt(data))
+                                    else:
+                                        w.write(data)
+                                    await w.drain()
+                            except Exception:
+                                pass
+                            finally:
+                                try: w.close()
+                                except: pass
+
+                        # We need to stop the main loop's reading to avoid conflict, 
+                        # or handle this connection in a separate task.
+                        # For this simple mock, we'll hijack the loop.
+                        
+                        # Task 1: Remote -> Client (Encrypted)
+                        t1 = asyncio.create_task(pipe(remote_reader, writer, encrypt=True))
+                        # Task 2: Client -> Remote (Decrypted)
+                        # We need to read from 'reader' (Client), decrypt, and send to 'remote_writer'
+                        
+                        try:
+                            while True:
+                                encrypted_client_data = await reader.read(4096)
+                                if not encrypted_client_data: break
+                                client_data = cipher.decrypt(encrypted_client_data)
+                                remote_writer.write(client_data)
+                                await remote_writer.drain()
+                        except Exception:
+                            pass
+                        
+                        # Cleanup
+                        t1.cancel()
+                        remote_writer.close()
+                        logger.info(f"[PROXY] Tunnel to {target_host} closed")
+                        # Break main loop as this connection is now consumed/closed
+                        break 
+
+                    except Exception as e:
+                        err_msg = f"HTTP/1.1 502 Bad Gateway\r\n\r\nProxy Error: {e}"
+                        writer.write(cipher.encrypt(err_msg.encode()))
+                        await writer.drain()
+                        logger.error(f"[PROXY] Error: {e}")
                 else:
                     # Step 5: Process and Forward Data (Echo for mock)
                     response_text = f"[SERVER ECHO] {decoded_data}"
