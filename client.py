@@ -3,6 +3,9 @@
 import asyncio
 import random
 import sys
+import hashlib
+import logging
+import os
 
 # --- Configuration (Configuration) ---
 SERVER_IP = '127.0.0.1' # Change to your server IP
@@ -14,6 +17,45 @@ VLESS_MAGIC_HEADER = b'\x56\x4c\x45\x53'
 # Keep-alive settings
 KEEP_ALIVE_INTERVAL = 60  # seconds 
 
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger("VLESS_Client")
+
+# --- Crypto (Stream Cipher) ---
+class StreamCipher:
+    """
+    Simple Hash-based Stream Cipher (XOR) using SHA256.
+    Provides confidentiality and high entropy for traffic.
+    """
+    def __init__(self, key: str, nonce: bytes):
+        self.key = key.encode()
+        self.nonce = nonce
+        self.counter = 0
+        self.buffer = b''
+
+    def _refill_buffer(self):
+        # Generate next block of keystream: SHA256(key + nonce + counter)
+        data = self.key + self.nonce + self.counter.to_bytes(8, 'big')
+        self.buffer += hashlib.sha256(data).digest()
+        self.counter += 1
+
+    def encrypt(self, data: bytes) -> bytes:
+        result = bytearray()
+        for byte in data:
+            if not self.buffer:
+                self._refill_buffer()
+            key_byte = self.buffer[0]
+            self.buffer = self.buffer[1:]
+            result.append(byte ^ key_byte)
+        return bytes(result)
+
+    def decrypt(self, data: bytes) -> bytes:
+        return self.encrypt(data) # XOR is symmetric
+
 # --- Client Fingerprint Mitigation (Mock Implementation) ---
 # To avoid being fingerprinted (e.g., by JA3/TLS fingerprinting tools), 
 # the client must mimic a popular, allowed client (browser/OS).
@@ -23,22 +65,13 @@ def generate_fingerprinted_reality_payload(sni: str) -> bytes:
     """
     Mocks a TLS ClientHello packet disguised for Reality SNI, 
     but embeds the VLESS header for server recognition.
-    
-    In a real implementation, this payload is complex (TLS version, 
-    ciphersuites, extensions, etc.) to match a specific popular fingerprint.
     """
     
     # 1. Mock TLS Header and ClientHello structure (Simplified)
-    # The payload MUST look like a legitimate ClientHello destined for 'sni'
     tls_header = b'\x16\x03\x01\x00\xfa' # Example TLS Handshake header
     client_hello_part = f"GET / HTTP/1.1\r\nHost: {sni}\r\n\r\n".encode('utf-8')
     
-    # 2. Embed VLESS Magic Header (The secret knockout)
-    # The server uses the location/content of this magic header for its check.
-    # In reality, this is often done by carefully encoding the VLESS UUID 
-    # and auxiliary data into one of the TLS extensions (e.g., PskIdentity, Xver).
-    
-    # We embed it randomly within the payload to increase complexity for DPI
+    # 2. Embed VLESS Magic Header
     insertion_point = random.randint(10, len(client_hello_part) - 5)
     
     reality_payload = (
@@ -46,78 +79,86 @@ def generate_fingerprinted_reality_payload(sni: str) -> bytes:
         client_hello_part[:insertion_point] + 
         VLESS_MAGIC_HEADER + 
         client_hello_part[insertion_point:] +
-        b'padding_to_match_target_size' # Add padding to match expected TLS packet size
+        b'padding_to_match_target_size' 
     )
     
-    print(f"[~] Generated Reality payload (size: {len(reality_payload)})")
+    logger.info(f"Generated Reality payload (size: {len(reality_payload)})")
     return reality_payload
 
 async def send_vless_data(message: str, keep_alive: bool = False):
     """Establishes connection and sends data via the mocked VLESS tunnel."""
     
-    print(f"[>] Connecting to VLESS server at {SERVER_IP}:{SERVER_PORT}...")
+    logger.info(f"Connecting to VLESS server at {SERVER_IP}:{SERVER_PORT}...")
     try:
         reader, writer = await asyncio.open_connection(SERVER_IP, SERVER_PORT)
         
-        # Step 1: Reality Handshake
+        # Step 0: Generate Nonce and Initialize Cipher
+        nonce = os.urandom(16)
+        cipher = StreamCipher(VLESS_UUID, nonce)
+        
+        # Step 1: Send Nonce (Plaintext)
+        writer.write(nonce)
+        
+        # Step 2: Reality Handshake (Encrypted)
         reality_payload = generate_fingerprinted_reality_payload(REALITY_SNI)
-        print("[>] Sending Reality payload...")
-        writer.write(reality_payload)
+        encrypted_payload = cipher.encrypt(reality_payload)
+        
+        logger.info("Sending Encrypted Reality payload...")
+        writer.write(encrypted_payload)
         await writer.drain()
         
-        # Assuming the server accepted the handshake (no immediate close/decoy response)
-        
-        # Step 2: Send actual VLESS data (Mock)
+        # Step 3: Send actual VLESS data (Encrypted)
         vless_data = f"VLESS_COMMAND_CONNECT_TO_DEST: {message}".encode('utf-8')
+        encrypted_vless_data = cipher.encrypt(vless_data)
         
         # --- VLESS Enhancement: Traffic Splitting for DPI Evasion ---
-        # Splitting the traffic into smaller chunks can evade DPI 
-        # that looks for large packets after the handshake.
         CHUNK_SIZE = 50 
         
-        print(f"[>] Sending VLESS data in chunks (Size: {len(vless_data)})")
+        logger.info(f"Sending Encrypted VLESS data in chunks (Size: {len(encrypted_vless_data)})")
         
-        for i in range(0, len(vless_data), CHUNK_SIZE):
-            chunk = vless_data[i:i + CHUNK_SIZE]
+        for i in range(0, len(encrypted_vless_data), CHUNK_SIZE):
+            chunk = encrypted_vless_data[i:i + CHUNK_SIZE]
             writer.write(chunk)
             await writer.drain()
-            # Introduce slight, random delay to mimic human/browser traffic
             await asyncio.sleep(random.uniform(0.01, 0.05)) 
 
-        # Step 3: Read response from the server (Echo for mock)
-        response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
+        # Step 4: Read response from the server (Encrypted)
+        encrypted_response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
         
-        if response:
-            print(f"[+] Server Response Received:\n{response.decode('utf-8', errors='ignore')}")
+        if encrypted_response:
+            response = cipher.decrypt(encrypted_response)
+            logger.info(f"Server Response Received:\n{response.decode('utf-8', errors='ignore')}")
         else:
-            print("[-] No response received (Server might have acted as Decoy or closed connection).")
+            logger.warning("No response received (Server might have acted as Decoy or closed connection).")
         
-        # Step 4: Keep connection alive if requested
+        # Step 5: Keep connection alive if requested
         if keep_alive:
-            print("[~] Maintaining persistent connection with keep-alive...")
+            logger.info("Maintaining persistent connection with keep-alive...")
             
             async def send_keep_alive():
                 """Периодически отправлять PING для поддержания соединения"""
                 while True:
                     await asyncio.sleep(KEEP_ALIVE_INTERVAL)
                     try:
-                        print("[~] Sending keep-alive PING...")
-                        writer.write(b'PING')
+                        logger.debug("Sending keep-alive PING...")
+                        writer.write(cipher.encrypt(b'PING'))
                         await writer.drain()
                         
                         # Ожидаем PONG
-                        pong = await asyncio.wait_for(reader.read(4096), timeout=10.0)
+                        encrypted_pong = await asyncio.wait_for(reader.read(4096), timeout=10.0)
+                        pong = cipher.decrypt(encrypted_pong)
+                        
                         if pong == b'PONG':
-                            print("[+] Keep-alive PONG received")
+                            logger.debug("Keep-alive PONG received")
                         elif pong == b'SERVER_PING':
-                            print("[~] Server PING received, sending PONG")
-                            writer.write(b'PONG')
+                            logger.debug("Server PING received, sending PONG")
+                            writer.write(cipher.encrypt(b'PONG'))
                             await writer.drain()
                     except asyncio.TimeoutError:
-                        print("[-] Keep-alive timeout")
+                        logger.warning("Keep-alive timeout")
                         break
                     except Exception as e:
-                        print(f"[-] Keep-alive error: {e}")
+                        logger.error(f"Keep-alive error: {e}")
                         break
             
             # Запускаем keep-alive в фоне
@@ -145,50 +186,54 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                     
                     # Send additional messages
                     additional_data = f"USER_MESSAGE: {user_input}".encode('utf-8')
-                    print(f"\n[>] Sending: {user_input}")
-                    for i in range(0, len(additional_data), CHUNK_SIZE):
-                        chunk = additional_data[i:i + CHUNK_SIZE]
+                    encrypted_additional_data = cipher.encrypt(additional_data)
+                    
+                    logger.info(f"Sending: {user_input}")
+                    for i in range(0, len(encrypted_additional_data), CHUNK_SIZE):
+                        chunk = encrypted_additional_data[i:i + CHUNK_SIZE]
                         writer.write(chunk)
                         await writer.drain()
                         await asyncio.sleep(random.uniform(0.01, 0.05))
                     
-                    print(f"[~] Sent {len(additional_data)} bytes, waiting for response...")
+                    logger.info(f"Sent {len(encrypted_additional_data)} bytes, waiting for response...")
                     
                     # Read response (with loop to handle PING/PONG)
                     while True:
-                        response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
-                        if not response:
-                            print("[-] Connection lost")
+                        encrypted_response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
+                        if not encrypted_response:
+                            logger.warning("Connection lost")
                             break
+                        
+                        response = cipher.decrypt(encrypted_response)
                         
                         # Handle server PING
                         if response == b'SERVER_PING':
-                            print("[~] Received SERVER_PING, sending PONG")
-                            writer.write(b'PONG')
+                            logger.debug("Received SERVER_PING, sending PONG")
+                            writer.write(cipher.encrypt(b'PONG'))
                             await writer.drain()
                             continue
                         
                         # Got actual response
                         response_text = response.decode('utf-8', errors='ignore')
-                        print(f"[<] Server response: {response_text}\n")
+                        logger.info(f"Server response: {response_text}\n")
                         break
                         
                 except asyncio.TimeoutError:
-                    print("[-] Response timeout")
+                    logger.warning("Response timeout")
                     break
                 except EOFError:
                     print("\n[!] Input interrupted")
                     break
 
     except ConnectionRefusedError:
-        print(f"[!] Connection refused. Is the server running on {SERVER_IP}:{SERVER_PORT}?")
+        logger.error(f"Connection refused. Is the server running on {SERVER_IP}:{SERVER_PORT}?")
     except Exception as e:
-        print(f"[-] An error occurred: {e}")
+        logger.error(f"An error occurred: {e}")
     finally:
         if 'writer' in locals() and not writer.is_closing():
             writer.close()
             await writer.wait_closed()
-        print("[<] VLESS Client connection closed.")
+        logger.info("VLESS Client connection closed.")
 
 
 async def main():

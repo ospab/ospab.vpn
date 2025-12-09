@@ -3,6 +3,9 @@
 import asyncio
 import uuid
 import sys
+import hashlib
+import time
+import logging
 
 # --- Configuration (Configuration) ---
 # Reality Configuration: Use a valid, unused TLS SNI/hostname (e.g., a CDN or large cloud provider)
@@ -33,20 +36,57 @@ banned_ips = set()
 # For our mock, we define a simple identifier.
 VLESS_MAGIC_HEADER = b'\x56\x4c\x45\x53' # VLES (VLESS) identifier
 
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger("VLESS_Server")
+
+# --- Crypto (Stream Cipher) ---
+class StreamCipher:
+    """
+    Simple Hash-based Stream Cipher (XOR) using SHA256.
+    Provides confidentiality and high entropy for traffic.
+    """
+    def __init__(self, key: str, nonce: bytes):
+        self.key = key.encode()
+        self.nonce = nonce
+        self.counter = 0
+        self.buffer = b''
+
+    def _refill_buffer(self):
+        # Generate next block of keystream: SHA256(key + nonce + counter)
+        data = self.key + self.nonce + self.counter.to_bytes(8, 'big')
+        self.buffer += hashlib.sha256(data).digest()
+        self.counter += 1
+
+    def encrypt(self, data: bytes) -> bytes:
+        result = bytearray()
+        for byte in data:
+            if not self.buffer:
+                self._refill_buffer()
+            key_byte = self.buffer[0]
+            self.buffer = self.buffer[1:]
+            result.append(byte ^ key_byte)
+        return bytes(result)
+
+    def decrypt(self, data: bytes) -> bytes:
+        return self.encrypt(data) # XOR is symmetric
+
 def check_ip_allowed(ip: str) -> bool:
     """
     Проверка IP по whitelist и ban list.
     Возвращает True если IP разрешен.
     """
-    import time
-    
     # Проверка ban list
     if ip in banned_ips:
         # Проверяеть, не истек ли ban
         if ip in failed_attempts:
             count, ban_until = failed_attempts[ip]
             if time.time() < ban_until:
-                print(f"[-] IP {ip} is banned until {ban_until}")
+                logger.warning(f"IP {ip} is banned until {ban_until}")
                 return False
             else:
                 # Ban истек, убираем из banned
@@ -55,15 +95,13 @@ def check_ip_allowed(ip: str) -> bool:
     
     # Проверка whitelist (если указан)
     if ALLOWED_IPS and ip not in ALLOWED_IPS:
-        print(f"[-] IP {ip} not in whitelist")
+        logger.warning(f"IP {ip} not in whitelist")
         return False
     
     return True
 
 def record_failed_attempt(ip: str):
     """Записываем неудачную попытку аутентификации"""
-    import time
-    
     if ip not in failed_attempts:
         failed_attempts[ip] = [1, 0]
     else:
@@ -75,30 +113,20 @@ def record_failed_attempt(ip: str):
         ban_until = time.time() + BAN_TIME
         failed_attempts[ip][1] = ban_until
         banned_ips.add(ip)
-        print(f"[!] IP {ip} banned for {BAN_TIME}s after {count} failed attempts")
+        logger.error(f"IP {ip} banned for {BAN_TIME}s after {count} failed attempts")
 
-def handle_reality_handshake(data: bytes) -> bool:
+def handle_reality_handshake(decrypted_data: bytes) -> bool:
     """
-    Simulates the Reality handshake verification.
-    The client sends a payload disguised as a TLS ClientHello packet 
-    intended for REALITY_SNI, but containing the VLESS_MAGIC_HEADER.
+    Verifies the decrypted handshake data contains the magic header.
     """
-    # 1. Check if the initial data length is reasonable for a ClientHello/Reality payload
-    if len(data) < 50:
-        print("[-] Handshake failed: Data too short.")
+    # 1. Check length
+    if len(decrypted_data) < 10: # Minimal check
         return False
     
-    # 2. Advanced Check: In a real Reality setup, the server checks the SNI 
-    #    in the TLS ClientHello (Client Hello) against REALITY_SNI 
-    #    and checks for a unique "Xver" field (unique ID).
-    
-    # For this mock, we simplify and check for our VLESS_MAGIC_HEADER 
-    # embedded *within* the initial disguised packet.
-    if VLESS_MAGIC_HEADER in data:
-        print("[+] Reality/VLESS Handshake passed.")
+    # 2. Check for Magic Header
+    if VLESS_MAGIC_HEADER in decrypted_data:
         return True
     else:
-        print("[-] Reality/VLESS Handshake failed: Magic header not found.")
         return False
 
 async def handle_client(reader, writer):
@@ -106,107 +134,107 @@ async def handle_client(reader, writer):
     addr = writer.get_extra_info('peername')
     client_ip = addr[0] if addr else 'unknown'
     
-    print(f"[>] New connection from {addr}")
+    logger.info(f"New connection from {addr}")
     
     # Security: Check IP whitelist and ban list
     if not check_ip_allowed(client_ip):
-        print(f"[!] Connection from {client_ip} rejected (whitelist/banned)")
+        logger.warning(f"Connection from {client_ip} rejected (whitelist/banned)")
         writer.close()
         await writer.wait_closed()
         return
 
     try:
-        # Step 1: Receive the initial handshake data
-        initial_data = await reader.read(4096)
+        # Step 1: Read Nonce (16 bytes)
+        nonce = await reader.read(16)
+        if len(nonce) < 16:
+            logger.warning(f"Connection from {addr} too short (no nonce)")
+            writer.close()
+            return
+
+        # Initialize Cipher
+        cipher = StreamCipher(VLESS_UUID, nonce)
+
+        # Step 2: Read Encrypted Handshake
+        encrypted_handshake = await reader.read(4096)
+        decrypted_handshake = cipher.decrypt(encrypted_handshake)
         
-        # Step 2: Reality Check
-        if not handle_reality_handshake(initial_data):
+        # Step 3: Reality Check
+        if not handle_reality_handshake(decrypted_handshake):
             # If the check fails, we can pretend to be the Decoy server
-            print(f"[!] Traffic from {addr} is not VLESS. Responding as Decoy.")
+            logger.warning(f"Traffic from {addr} is not VLESS (Handshake failed). Responding as Decoy.")
             
             # Security: Record failed attempt for rate limiting
             record_failed_attempt(client_ip)
             
             # --- Decoy Simulation ---
-            # In a real setup, this would serve the actual website content 
-            # for REALITY_SNI using the decoy's TLS certificate.
             writer.write(b'HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
             await writer.drain()
             writer.close()
             await writer.wait_closed()
             return
 
-        # Step 3: VLESS Authentication (Mock)
-        # In a real VLESS, the UUID is exchanged securely. 
-        # Here we assume the UUID was part of the validated handshake payload.
-        # We simulate the authentication success.
+        logger.info(f"Client {addr} authenticated successfully.")
         
-        print(f"[+] Client {addr} authenticated successfully.")
-        
-        # --- Start VLESS Data Tunnel (VLESS Tunneling) ---
-        
-        # The VLESS server now reads the command header (e.g., connect to destination X)
-        # For simplicity, we just echo data back in this mock.
-        
-        print(f"[+] Starting tunnel for {addr}")
+        # --- Start VLESS Data Tunnel (Encrypted) ---
         
         last_ping_time = asyncio.get_event_loop().time()
         
         while True:
-            # Step 4: Data Tunneling (Read VLESS data)
+            # Step 4: Data Tunneling (Read Encrypted VLESS data)
             try:
-                data = await asyncio.wait_for(reader.read(8192), timeout=KEEP_ALIVE_TIMEOUT)
+                encrypted_data = await asyncio.wait_for(reader.read(8192), timeout=KEEP_ALIVE_TIMEOUT)
             except asyncio.TimeoutError:
-                print(f"[~] Keep-alive timeout for {addr}, closing connection")
+                logger.info(f"Keep-alive timeout for {addr}, closing connection")
                 break
                 
-            if not data:
-                print(f"[~] Client {addr} closed connection")
+            if not encrypted_data:
+                logger.info(f"Client {addr} closed connection")
                 break
+            
+            # Decrypt data
+            data = cipher.decrypt(encrypted_data)
             
             # Handle PING/PONG keep-alive
             if data == b'PING':
-                print(f"[~] Received PING from {addr}, sending PONG")
-                writer.write(b'PONG')
+                logger.debug(f"Received PING from {addr}, sending PONG")
+                writer.write(cipher.encrypt(b'PONG'))
                 await writer.drain()
                 last_ping_time = asyncio.get_event_loop().time()
                 continue
             
             # Handle client PONG response to server PING
             if data == b'PONG':
-                print(f"[~] Received PONG from {addr}")
+                logger.debug(f"Received PONG from {addr}")
                 last_ping_time = asyncio.get_event_loop().time()
                 continue
             
             # Send PING if no activity for KEEP_ALIVE_INTERVAL
             current_time = asyncio.get_event_loop().time()
             if current_time - last_ping_time > KEEP_ALIVE_INTERVAL:
-                print(f"[~] Sending keep-alive PING to {addr}")
-                writer.write(b'SERVER_PING')
+                logger.debug(f"Sending keep-alive PING to {addr}")
+                writer.write(cipher.encrypt(b'SERVER_PING'))
                 await writer.drain()
                 last_ping_time = current_time
             
-            # --- VLESS Enhancement: White List Check (Mock) ---
-            # Assume data contains the destination IP/Port that needs verification
-            # In a real scenario, this check happens after the VLESS command is parsed.
-            
             # Decode and display message content
             decoded_data = data.decode('utf-8', errors='ignore')
-            print(f"\n[~] Received {len(data)} bytes from {addr}")
-            print(f"[<] Message content: {decoded_data}")
+            logger.info(f"Received {len(data)} bytes from {addr}")
+            logger.info(f"Message content: {decoded_data}")
             
             # Step 5: Process and Forward Data (Echo for mock)
-            response = f"[SERVER ECHO] {decoded_data}".encode('utf-8')
-            writer.write(response)
+            response_text = f"[SERVER ECHO] {decoded_data}"
+            encrypted_response = cipher.encrypt(response_text.encode('utf-8'))
+            
+            writer.write(encrypted_response)
             await writer.drain()
-            print(f"[>] Sent echo response ({len(response)} bytes)\n")
+            logger.info(f"Sent echo response ({len(encrypted_response)} bytes)")
 
     except ConnectionResetError:
-        print(f"[-] Connection closed abruptly by {addr}")
+        logger.warning(f"Connection closed abruptly by {addr}")
     except Exception as e:
-        print(f"[-] Error handling connection from {addr}: {e}")
+        logger.error(f"Error handling connection from {addr}: {e}")
     finally:
-        print(f"[<] Connection closed for {addr}")
+        logger.info(f"Connection closed for {addr}")
         if not writer.is_closing():
             writer.close()
             await writer.wait_closed()
@@ -232,6 +260,7 @@ async def main():
     print(f"\n    {VLESS_UUID}\n")
     print(f"Reality Decoy SNI: {REALITY_SNI}")
     print(f"Listening Port: {LISTEN_PORT}")
+    print(f"Encryption: ChaCha20-Poly1305 (Mocked via SHA256 Stream Cipher)")
     print("="*60 + "\n")
     
     server = await asyncio.start_server(
@@ -239,7 +268,7 @@ async def main():
     )
     
     addrs = ', '.join(str(sock.getsockname()) for sock in server.sockets)
-    print(f"[+] Server is ready on {addrs}")
+    logger.info(f"Server is ready on {addrs}")
     print(f"[~] Press Ctrl+C to stop\n")
 
     async with server:
