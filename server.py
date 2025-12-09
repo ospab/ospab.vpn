@@ -78,6 +78,9 @@ class StreamCipher:
     def decrypt(self, data: bytes) -> bytes:
         return self.encrypt(data) # XOR is symmetric
 
+# --- Global State ---
+active_connections = [] # List of {'writer': writer, 'cipher': cipher, 'addr': addr}
+
 def check_ip_allowed(ip: str) -> bool:
     """
     Проверка IP по whitelist и ban list.
@@ -178,72 +181,81 @@ async def handle_client(reader, writer):
 
         logger.info(f"Client {addr} authenticated successfully.")
         
-        # --- Start VLESS Data Tunnel (Encrypted) ---
+        # Register connection for broadcasting
+        conn_info = {'writer': writer, 'cipher': cipher, 'addr': addr}
+        active_connections.append(conn_info)
         
-        last_ping_time = asyncio.get_event_loop().time()
-        
-        while True:
-            # Step 4: Data Tunneling (Read Encrypted VLESS data)
-            try:
-                encrypted_data = await asyncio.wait_for(reader.read(8192), timeout=KEEP_ALIVE_TIMEOUT)
-            except asyncio.TimeoutError:
-                logger.info(f"Keep-alive timeout for {addr}, closing connection")
-                break
+        try:
+            # --- Start VLESS Data Tunnel (Encrypted) ---
+            
+            last_ping_time = asyncio.get_event_loop().time()
+            
+            while True:
+                # Step 4: Data Tunneling (Read Encrypted VLESS data)
+                try:
+                    encrypted_data = await asyncio.wait_for(reader.read(8192), timeout=KEEP_ALIVE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.info(f"Keep-alive timeout for {addr}, closing connection")
+                    break
+                    
+                if not encrypted_data:
+                    logger.info(f"Client {addr} closed connection")
+                    break
                 
-            if not encrypted_data:
-                logger.info(f"Client {addr} closed connection")
-                break
-            
-            # Decrypt data
-            data = cipher.decrypt(encrypted_data)
-            
-            # Handle PING/PONG keep-alive
-            if data == b'PING':
-                logger.debug(f"Received PING from {addr}, sending PONG")
-                writer.write(cipher.encrypt(b'PONG'))
+                # Decrypt data
+                data = cipher.decrypt(encrypted_data)
+                
+                # Handle PING/PONG keep-alive
+                if data == b'PING':
+                    logger.debug(f"Received PING from {addr}, sending PONG")
+                    writer.write(cipher.encrypt(b'PONG'))
+                    await writer.drain()
+                    last_ping_time = asyncio.get_event_loop().time()
+                    continue
+                
+                # Handle client PONG response to server PING
+                if data == b'PONG':
+                    logger.debug(f"Received PONG from {addr}")
+                    last_ping_time = asyncio.get_event_loop().time()
+                    continue
+                
+                # Send PING if no activity for KEEP_ALIVE_INTERVAL
+                current_time = asyncio.get_event_loop().time()
+                if current_time - last_ping_time > KEEP_ALIVE_INTERVAL:
+                    logger.debug(f"Sending keep-alive PING to {addr}")
+                    writer.write(cipher.encrypt(b'SERVER_PING'))
+                    await writer.drain()
+                    last_ping_time = current_time
+                
+                # Decode and display message content
+                decoded_data = data.decode('utf-8', errors='ignore').strip()
+                logger.info(f"Received from {addr}: {decoded_data}")
+                
+                # Command Handling
+                if decoded_data == "/help":
+                    response_text = (
+                        "--- Server Commands ---\n"
+                        "/help            - Show this help message\n"
+                        "/message <text>  - Send a logged message to admin\n"
+                        "Any other text   - Echo back"
+                    )
+                elif decoded_data.startswith("/message "):
+                    msg_content = decoded_data[9:]
+                    logger.info(f"!!! USER MESSAGE from {addr}: {msg_content}")
+                    response_text = f"Server received: {msg_content}"
+                else:
+                    # Step 5: Process and Forward Data (Echo for mock)
+                    response_text = f"[SERVER ECHO] {decoded_data}"
+                
+                encrypted_response = cipher.encrypt(response_text.encode('utf-8'))
+                
+                writer.write(encrypted_response)
                 await writer.drain()
-                last_ping_time = asyncio.get_event_loop().time()
-                continue
-            
-            # Handle client PONG response to server PING
-            if data == b'PONG':
-                logger.debug(f"Received PONG from {addr}")
-                last_ping_time = asyncio.get_event_loop().time()
-                continue
-            
-            # Send PING if no activity for KEEP_ALIVE_INTERVAL
-            current_time = asyncio.get_event_loop().time()
-            if current_time - last_ping_time > KEEP_ALIVE_INTERVAL:
-                logger.debug(f"Sending keep-alive PING to {addr}")
-                writer.write(cipher.encrypt(b'SERVER_PING'))
-                await writer.drain()
-                last_ping_time = current_time
-            
-            # Decode and display message content
-            decoded_data = data.decode('utf-8', errors='ignore').strip()
-            logger.info(f"Received from {addr}: {decoded_data}")
-            
-            # Command Handling
-            if decoded_data == "/help":
-                response_text = (
-                    "--- Server Commands ---\n"
-                    "/help            - Show this help message\n"
-                    "/message <text>  - Send a logged message to admin\n"
-                    "Any other text   - Echo back"
-                )
-            elif decoded_data.startswith("/message "):
-                msg_content = decoded_data[9:]
-                logger.info(f"!!! USER MESSAGE from {addr}: {msg_content}")
-                response_text = f"Server received: {msg_content}"
-            else:
-                # Step 5: Process and Forward Data (Echo for mock)
-                response_text = f"[SERVER ECHO] {decoded_data}"
-            
-            encrypted_response = cipher.encrypt(response_text.encode('utf-8'))
-            
-            writer.write(encrypted_response)
-            await writer.drain()
-            logger.info(f"Sent response ({len(encrypted_response)} bytes)")
+                logger.info(f"Sent response ({len(encrypted_response)} bytes)")
+        finally:
+            if conn_info in active_connections:
+                active_connections.remove(conn_info)
+            logger.info(f"Connection with {addr} cleaned up")
 
     except ConnectionResetError:
         logger.warning(f"Connection closed abruptly by {addr}")
@@ -254,6 +266,50 @@ async def handle_client(reader, writer):
         if not writer.is_closing():
             writer.close()
             await writer.wait_closed()
+
+async def console_input_task():
+    print("Console commands enabled. Type '/help' for list.")
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            cmd = await loop.run_in_executor(None, input, "> ")
+            cmd = cmd.strip()
+            if not cmd:
+                continue
+            
+            if cmd == "/help":
+                print("--- Console Commands ---")
+                print("/help            - Show this help")
+                print("/message <text>  - Broadcast message to all clients")
+                print("/list            - List connected clients")
+                print("/stop            - Stop server")
+            elif cmd == "/stop":
+                print("Stopping server...")
+                break
+            elif cmd == "/list":
+                print(f"Active connections: {len(active_connections)}")
+                for c in active_connections:
+                    print(f" - {c['addr']}")
+            elif cmd.startswith("/message "):
+                msg = cmd[9:]
+                count = 0
+                for conn in active_connections:
+                    try:
+                        writer = conn['writer']
+                        cipher = conn['cipher']
+                        encrypted_msg = cipher.encrypt(f"[ADMIN BROADCAST] {msg}".encode('utf-8'))
+                        writer.write(encrypted_msg)
+                        await writer.drain()
+                        count += 1
+                    except Exception as e:
+                        print(f"Failed to send to {conn['addr']}: {e}")
+                print(f"Broadcast sent to {count} clients.")
+            else:
+                print(f"Unknown command: {cmd}")
+        except EOFError:
+            break
+        except Exception as e:
+            print(f"Console error: {e}")
 
 async def main():
     """Starts the VLESS-Reality Mock Server."""
@@ -309,8 +365,19 @@ async def main():
     addrs = ', '.join(str(sock.getsockname()) for sock in server.sockets)
     logger.info(f"Server listening on {addrs}")
     
-    async with server:
-        await server.serve_forever()
+    server_task = asyncio.create_task(server.serve_forever())
+    
+    try:
+        await console_input_task()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+        print("Server stopped.")
 
 if __name__ == "__main__":
     try:

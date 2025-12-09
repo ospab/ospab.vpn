@@ -184,6 +184,37 @@ async def send_vless_data(message: str, keep_alive: bool = False):
             
             keep_alive_task = asyncio.create_task(send_keep_alive())
             
+            # Background Read Task
+            async def read_loop():
+                try:
+                    while True:
+                        encrypted_response = await reader.read(4096)
+                        if not encrypted_response:
+                            print("\n[!] Server closed connection.")
+                            # Stop the main loop? 
+                            # We can't easily stop the input() blocking call from here.
+                            # But we can exit the process or set a flag.
+                            os._exit(0) 
+                            break
+                        
+                        response = cipher.decrypt(encrypted_response)
+                        
+                        if response == b'PONG':
+                            continue
+                        if response == b'SERVER_PING':
+                            writer.write(cipher.encrypt(b'PONG'))
+                            await writer.drain()
+                            continue
+                            
+                        print(f"\nServer: {response.decode('utf-8', errors='ignore')}")
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    print(f"\n[!] Read error: {e}")
+                    os._exit(1)
+
+            read_task = asyncio.create_task(read_loop())
+            
             print("\n" + "="*60)
             print("[~] Connection established!")
             print("[~] Type '/help' for commands, '/message <text>' to send msg, 'exit' to quit")
@@ -193,7 +224,7 @@ async def send_vless_data(message: str, keep_alive: bool = False):
             while True:
                 try:
                     # Use run_in_executor to avoid blocking asyncio loop with input()
-                    user_input = await asyncio.get_event_loop().run_in_executor(None, input, "\nclient> ")
+                    user_input = await asyncio.get_event_loop().run_in_executor(None, input, "> ")
                     user_input = user_input.strip()
                     
                     if not user_input:
@@ -201,6 +232,7 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                         
                     if user_input.lower() == 'exit':
                         keep_alive_task.cancel()
+                        read_task.cancel()
                         break
                     
                     # Encrypt and Send
@@ -208,22 +240,7 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                     writer.write(encrypted_msg)
                     await writer.drain()
                     
-                    # Wait for Response
-                    # Note: In a real app, reading should be in a separate task to handle async PINGs/Messages
-                    # Here we do a simple blocking read for demonstration
-                    while True:
-                        encrypted_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
-                        response = cipher.decrypt(encrypted_response)
-                        
-                        if response == b'PONG':
-                            continue # Ignore keep-alive pong
-                        if response == b'SERVER_PING':
-                            writer.write(cipher.encrypt(b'PONG'))
-                            await writer.drain()
-                            continue
-                            
-                        print(f"Server: {response.decode('utf-8', errors='ignore')}")
-                        break
+                    # Response is handled by read_loop
                         
                 except asyncio.TimeoutError:
                     print("[-] Timeout waiting for response")
