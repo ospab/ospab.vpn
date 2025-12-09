@@ -8,6 +8,7 @@ import hashlib
 import time
 import logging
 import os
+import socket
 
 # --- Configuration (Configuration) ---
 # Reality Configuration: Use a valid, unused TLS SNI/hostname (e.g., a CDN or large cloud provider)
@@ -243,31 +244,42 @@ async def handle_client(reader, writer):
 
 async def main():
     """Starts the VLESS-Reality Mock Server."""
-    global VLESS_UUID, LISTEN_PORT
+    global VLESS_UUID, LISTEN_PORT, REALITY_SNI
     
     # Load UUID from Env or Generate
     if not VLESS_UUID:
         VLESS_UUID = str(uuid.uuid4())
-        uuid_source = "Generated (Random)"
-    else:
-        uuid_source = "Environment Variable"
     
-    # Проверка аргументов командной строки для порта
-    if len(sys.argv) > 1:
-        try:
-            LISTEN_PORT = int(sys.argv[1])
-        except ValueError:
-            print(f"[-] Invalid port number: {sys.argv[1]}. Using default {LISTEN_PORT}")
+    # Interactive Configuration
+    print("\n--- Server Setup ---")
     
-    print("="*60)
-    print("--- VLESS-Reality Mock Server Starting ---")
-    print("="*60)
-    print(f"\n[!] SERVER UUID ({uuid_source}):")
-    print(f"\n    {VLESS_UUID}\n")
-    print(f"Reality Decoy SNI: {REALITY_SNI}")
-    print(f"Listening Port: {LISTEN_PORT}")
-    print(f"Encryption: ChaCha20-Poly1305 (Mocked via SHA256 Stream Cipher)")
-    print("="*60 + "\n")
+    # Port Input
+    p_in = input(f"Port [{LISTEN_PORT}]: ").strip()
+    if p_in.isdigit():
+        LISTEN_PORT = int(p_in)
+        
+    # SNI Input
+    s_in = input(f"SNI [{REALITY_SNI}]: ").strip()
+    if s_in:
+        REALITY_SNI = s_in
+        
+    # Get Server IP
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        server_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        server_ip = "127.0.0.1"
+
+    print("\n" + "="*50)
+    print("VLESS SERVER RUNNING")
+    print("="*50)
+    print(f"IP:   {server_ip}")
+    print(f"PORT: {LISTEN_PORT}")
+    print(f"UUID: {VLESS_UUID}")
+    print(f"SNI:  {REALITY_SNI}")
+    print("="*50 + "\n")
     
     try:
         server = await asyncio.start_server(
@@ -275,18 +287,15 @@ async def main():
         )
     except OSError as e:
         if e.errno == 98: # Address already in use
-            print(f"\n[!] CRITICAL ERROR: Port {LISTEN_PORT} is already in use!")
-            print(f"    The server is likely already running in the background (systemd).")
-            print(f"    To stop the background service: systemctl stop vless-reality")
-            print(f"    To view the running service logs: journalctl -u vless-reality -n 20")
+            print(f"[!] Error: Port {LISTEN_PORT} is busy.")
+            print(f"    Stop existing service: systemctl stop vless-reality")
             sys.exit(1)
         else:
             raise e
     
     addrs = ', '.join(str(sock.getsockname()) for sock in server.sockets)
-    logger.info(f"Server is ready on {addrs}")
-    print(f"[~] Press Ctrl+C to stop\n")
-
+    logger.info(f"Server listening on {addrs}")
+    
     async with server:
         await server.serve_forever()
 
