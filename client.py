@@ -121,27 +121,29 @@ def generate_fingerprinted_reality_payload(sni: str) -> bytes:
     logger.info(f"Generated Reality payload (size: {len(reality_payload)})")
     return reality_payload
 
+async def create_vless_connection():
+    """Creates a new raw connection to the VLESS server and performs handshake."""
+    reader, writer = await asyncio.open_connection(SERVER_IP, SERVER_PORT)
+    
+    nonce = os.urandom(16)
+    cipher = StreamCipher(VLESS_UUID, nonce)
+    
+    # 1. Send Nonce
+    writer.write(nonce)
+    
+    # 2. Send Reality Handshake
+    payload = generate_fingerprinted_reality_payload(REALITY_SNI)
+    writer.write(cipher.encrypt(payload))
+    await writer.drain()
+    
+    return reader, writer, cipher
+
 async def send_vless_data(message: str, keep_alive: bool = False):
     """Establishes connection and sends data via the mocked VLESS tunnel."""
     
     logger.info(f"Connecting to VLESS server at {SERVER_IP}:{SERVER_PORT}...")
     try:
-        reader, writer = await asyncio.open_connection(SERVER_IP, SERVER_PORT)
-        
-        # Step 0: Generate Nonce and Initialize Cipher
-        nonce = os.urandom(16)
-        cipher = StreamCipher(VLESS_UUID, nonce)
-        
-        # Step 1: Send Nonce (Plaintext)
-        writer.write(nonce)
-        
-        # Step 2: Reality Handshake (Encrypted)
-        reality_payload = generate_fingerprinted_reality_payload(REALITY_SNI)
-        encrypted_payload = cipher.encrypt(reality_payload)
-        
-        logger.info("Sending Encrypted Reality payload...")
-        writer.write(encrypted_payload)
-        await writer.drain()
+        reader, writer, cipher = await create_vless_connection()
         
         # Step 3: Send actual VLESS data (Encrypted)
         # vless_data = f"VLESS_COMMAND_CONNECT_TO_DEST: {message}".encode('utf-8')
@@ -244,42 +246,73 @@ async def send_vless_data(message: str, keep_alive: bool = False):
 
             # --- Local Proxy Listener (Real Traffic) ---
             async def handle_local_proxy(local_reader, local_writer):
+                remote_writer = None
                 try:
-                    # Read request from browser/system
-                    data = await local_reader.read(4096)
-                    if not data: return
+                    # 1. Connect to VPN Server for this request
+                    remote_reader, remote_writer, cipher_proxy = await create_vless_connection()
                     
-                    # Encrypt and forward to VLESS tunnel
-                    # Note: In a real implementation, we need a separate VLESS stream per connection.
-                    # Here we are multiplexing everything into ONE tunnel, which is messy but demonstrates the concept.
-                    # The server will see mixed packets if multiple requests happen.
-                    # For this mock, we assume sequential requests or just fire-and-forget.
+                    # 2. Pipe Local -> Remote (Encrypted)
+                    async def pipe_local_to_remote():
+                        try:
+                            while True:
+                                data = await local_reader.read(4096)
+                                if not data: break
+                                remote_writer.write(cipher_proxy.encrypt(data))
+                                await remote_writer.drain()
+                        except Exception: pass
+                        finally: 
+                            try: remote_writer.close()
+                            except: pass
+
+                    # 3. Pipe Remote -> Local (Decrypted)
+                    async def pipe_remote_to_local():
+                        try:
+                            while True:
+                                data = await remote_reader.read(4096)
+                                if not data: break
+                                local_writer.write(cipher_proxy.decrypt(data))
+                                await local_writer.drain()
+                        except Exception: pass
+                        finally: 
+                            try: local_writer.close()
+                            except: pass
+
+                    await asyncio.gather(pipe_local_to_remote(), pipe_remote_to_local())
                     
-                    encrypted_req = cipher.encrypt(data)
-                    writer.write(encrypted_req)
-                    await writer.drain()
-                    
-                    # We can't easily route the response back to the specific local_writer 
-                    # because the main read_loop consumes all server responses.
-                    # This is the limitation of this simple single-socket tunnel.
-                    # But the server WILL execute the request.
-                    
-                    local_writer.close()
                 except Exception as e:
                     print(f"Local Proxy Error: {e}")
+                    if remote_writer: remote_writer.close()
+                    local_writer.close()
 
             local_proxy_server = None
 
             async def start_local_proxy():
                 nonlocal local_proxy_server
                 try:
-                    local_proxy_server = await asyncio.start_server(handle_local_proxy, '127.0.0.1', 10808)
-                    print(f"\n[SYSTEM PROXY] Listening on 127.0.0.1:10808")
+                    # Listen on 0.0.0.0 to allow connections from WSL/LAN
+                    local_proxy_server = await asyncio.start_server(handle_local_proxy, '0.0.0.0', 10808)
+                    print(f"\n[SYSTEM PROXY] Listening on 0.0.0.0:10808")
                 except Exception as e:
                     print(f"[!] Failed to bind port 10808: {e}")
                     return
 
                 print(f"[DEBUG] Platform detected: {sys.platform}")
+                
+                # Check for WSL
+                is_wsl = False
+                if sys.platform == "linux":
+                    try:
+                        with open('/proc/version', 'r') as f:
+                            if "microsoft" in f.read().lower():
+                                is_wsl = True
+                    except: pass
+
+                if is_wsl:
+                    print("\n[!] WSL Detected!")
+                    print("    WSL does not share proxy settings with Windows automatically.")
+                    print("    Run this command in your WSL terminal to use the proxy:")
+                    print(f"    export http_proxy=http://127.0.0.1:10808 https_proxy=http://127.0.0.1:10808")
+                    print("    (Note: If client is running in Windows, use the Windows host IP instead of 127.0.0.1)")
                 
                 # Set Windows Proxy
                 if sys.platform == "win32":
@@ -290,12 +323,18 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                         winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
                         winreg.CloseKey(key)
                         print("[SYSTEM PROXY] Windows Proxy Settings ENABLED")
+                        
+                        # Hint for WSL users on Windows
+                        print("\n[INFO] To use this proxy in WSL 2:")
+                        print("    1. Get Windows IP: cat /etc/resolv.conf | grep nameserver")
+                        print("    2. export http_proxy=http://<WINDOWS_IP>:10808")
+                        
                         os.system("inetcpl.cpl ,4") # Optional: Open settings to refresh
                     except Exception as e:
                         print(f"[!] Failed to set Windows Proxy: {e}")
                 
                 # Set Linux Proxy (GNOME)
-                elif sys.platform == "linux":
+                elif sys.platform == "linux" and not is_wsl:
                     try:
                         # Check if gsettings is available
                         if os.system("which gsettings > /dev/null 2>&1") == 0:
