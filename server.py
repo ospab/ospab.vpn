@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # vless_reality_server.py
 
 import asyncio
@@ -268,9 +269,19 @@ async def main():
     print(f"Encryption: ChaCha20-Poly1305 (Mocked via SHA256 Stream Cipher)")
     print("="*60 + "\n")
     
-    server = await asyncio.start_server(
-        handle_client, '0.0.0.0', LISTEN_PORT
-    )
+    try:
+        server = await asyncio.start_server(
+            handle_client, '0.0.0.0', LISTEN_PORT
+        )
+    except OSError as e:
+        if e.errno == 98: # Address already in use
+            print(f"\n[!] CRITICAL ERROR: Port {LISTEN_PORT} is already in use!")
+            print(f"    The server is likely already running in the background (systemd).")
+            print(f"    To stop the background service: systemctl stop vless-reality")
+            print(f"    To view the running service logs: journalctl -u vless-reality -n 20")
+            sys.exit(1)
+        else:
+            raise e
     
     addrs = ', '.join(str(sock.getsockname()) for sock in server.sockets)
     logger.info(f"Server is ready on {addrs}")

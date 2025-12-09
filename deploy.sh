@@ -28,19 +28,7 @@ fi
 echo "[OK] Dependencies installed"
 echo ""
 
-# Configure firewall
-echo "[2/6] Configuring firewall..."
-if command -v ufw &> /dev/null; then
-    ufw allow 443/tcp
-    ufw allow 22/tcp  # Keep SSH open!
-    echo "y" | ufw enable
-elif command -v firewall-cmd &> /dev/null; then
-    firewall-cmd --permanent --add-port=443/tcp
-    firewall-cmd --permanent --add-port=22/tcp
-    firewall-cmd --reload
-fi
-echo "[OK] Firewall configured"
-echo ""
+
 
 # Check UUID
 echo "[3/6] Checking UUID configuration..."

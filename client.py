@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # vless_reality_client.py
 
 import asyncio
