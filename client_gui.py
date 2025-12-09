@@ -481,6 +481,7 @@ class ModernVLESSClient:
                 self._handle_local_proxy_connection, '127.0.0.1', 10808
             )
             self.log("[SYSTEM PROXY] Listening on 127.0.0.1:10808", "SYSTEM")
+            self.log(f"[DEBUG] Platform: {sys.platform}", "SYSTEM")
             
             # Set Windows Proxy
             if sys.platform == "win32":
@@ -494,6 +495,24 @@ class ModernVLESSClient:
                     os.system("inetcpl.cpl ,4") # Optional: Open settings to refresh
                 except Exception as e:
                     self.log(f"[!] Failed to set Windows Proxy: {e}", "ERROR")
+            
+            # Set Linux Proxy (GNOME)
+            elif sys.platform == "linux":
+                try:
+                    if os.system("which gsettings > /dev/null 2>&1") == 0:
+                        self.log("[DEBUG] Found gsettings, applying GNOME proxy...", "SYSTEM")
+                        os.system("gsettings set org.gnome.system.proxy mode 'manual'")
+                        os.system("gsettings set org.gnome.system.proxy.http host '127.0.0.1'")
+                        os.system("gsettings set org.gnome.system.proxy.http port 10808")
+                        os.system("gsettings set org.gnome.system.proxy.https host '127.0.0.1'")
+                        os.system("gsettings set org.gnome.system.proxy.https port 10808")
+                        self.log("[SYSTEM PROXY] GNOME Proxy Settings ENABLED", "SUCCESS")
+                    else:
+                        self.log("[!] 'gsettings' not found. Manual config required.", "ERROR")
+                        self.log("    Set HTTP/HTTPS proxy to 127.0.0.1:10808", "SYSTEM")
+                except Exception as e:
+                    self.log(f"[!] Linux Proxy Error: {e}", "ERROR")
+
         except Exception as e:
             self.log(f"Failed to start local proxy: {e}", "ERROR")
 
@@ -510,6 +529,15 @@ class ModernVLESSClient:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
                 winreg.CloseKey(key)
                 self.log("[SYSTEM PROXY] Windows Proxy Settings DISABLED", "SYSTEM")
+            except Exception:
+                pass
+        
+        # Disable Linux Proxy
+        elif sys.platform == "linux":
+            try:
+                if os.system("which gsettings > /dev/null 2>&1") == 0:
+                    os.system("gsettings set org.gnome.system.proxy mode 'none'")
+                    self.log("[SYSTEM PROXY] GNOME Proxy Settings DISABLED", "SYSTEM")
             except Exception:
                 pass
 

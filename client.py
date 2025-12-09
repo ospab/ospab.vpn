@@ -272,8 +272,14 @@ async def send_vless_data(message: str, keep_alive: bool = False):
 
             async def start_local_proxy():
                 nonlocal local_proxy_server
-                local_proxy_server = await asyncio.start_server(handle_local_proxy, '127.0.0.1', 10808)
-                print(f"\n[SYSTEM PROXY] Listening on 127.0.0.1:10808")
+                try:
+                    local_proxy_server = await asyncio.start_server(handle_local_proxy, '127.0.0.1', 10808)
+                    print(f"\n[SYSTEM PROXY] Listening on 127.0.0.1:10808")
+                except Exception as e:
+                    print(f"[!] Failed to bind port 10808: {e}")
+                    return
+
+                print(f"[DEBUG] Platform detected: {sys.platform}")
                 
                 # Set Windows Proxy
                 if sys.platform == "win32":
@@ -287,11 +293,31 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                         os.system("inetcpl.cpl ,4") # Optional: Open settings to refresh
                     except Exception as e:
                         print(f"[!] Failed to set Windows Proxy: {e}")
+                
+                # Set Linux Proxy (GNOME)
+                elif sys.platform == "linux":
+                    try:
+                        # Check if gsettings is available
+                        if os.system("which gsettings > /dev/null 2>&1") == 0:
+                            print("[DEBUG] 'gsettings' found. Attempting to set GNOME proxy...")
+                            os.system("gsettings set org.gnome.system.proxy mode 'manual'")
+                            os.system("gsettings set org.gnome.system.proxy.http host '127.0.0.1'")
+                            os.system("gsettings set org.gnome.system.proxy.http port 10808")
+                            os.system("gsettings set org.gnome.system.proxy.https host '127.0.0.1'")
+                            os.system("gsettings set org.gnome.system.proxy.https port 10808")
+                            print("[SYSTEM PROXY] GNOME Proxy Settings ENABLED")
+                        else:
+                            print("[!] 'gsettings' not found. Cannot set system proxy automatically.")
+                            print("    Please manually set HTTP/HTTPS proxy to 127.0.0.1:10808")
+                    except Exception as e:
+                        print(f"[!] Failed to set Linux Proxy: {e}")
 
             def stop_local_proxy():
                 if local_proxy_server:
                     local_proxy_server.close()
                 
+                print(f"[DEBUG] Disabling proxy for platform: {sys.platform}")
+
                 # Disable Windows Proxy
                 if sys.platform == "win32":
                     import winreg
@@ -300,6 +326,15 @@ async def send_vless_data(message: str, keep_alive: bool = False):
                         winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
                         winreg.CloseKey(key)
                         print("[SYSTEM PROXY] Windows Proxy Settings DISABLED")
+                    except Exception:
+                        pass
+                
+                # Disable Linux Proxy (GNOME)
+                elif sys.platform == "linux":
+                    try:
+                        if os.system("which gsettings > /dev/null 2>&1") == 0:
+                            os.system("gsettings set org.gnome.system.proxy mode 'none'")
+                            print("[SYSTEM PROXY] GNOME Proxy Settings DISABLED")
                     except Exception:
                         pass
 
