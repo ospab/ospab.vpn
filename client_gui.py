@@ -22,18 +22,32 @@ class Cipher:
         self.counter = 0
         self.buf = b''
 
-    def _gen(self):
-        self.buf += hashlib.sha256(self.key + self.nonce + self.counter.to_bytes(8, 'big')).digest()
+    def _gen_block(self):
+        block = hashlib.sha256(self.key + self.nonce + self.counter.to_bytes(8, 'big')).digest()
         self.counter += 1
+        return block
 
     def process(self, data):
-        out = bytearray()
-        for b in data:
-            if not self.buf:
-                self._gen()
-            out.append(b ^ self.buf[0])
-            self.buf = self.buf[1:]
-        return bytes(out)
+        result = bytearray(len(data))
+        pos = 0
+        
+        if self.buf:
+            use = min(len(self.buf), len(data))
+            for i in range(use):
+                result[i] = data[i] ^ self.buf[i]
+            self.buf = self.buf[use:]
+            pos = use
+        
+        while pos < len(data):
+            block = self._gen_block()
+            use = min(32, len(data) - pos)
+            for i in range(use):
+                result[pos + i] = data[pos + i] ^ block[i]
+            if use < 32:
+                self.buf = block[use:]
+            pos += use
+        
+        return bytes(result)
 
 
 def make_handshake(sni):
@@ -363,18 +377,24 @@ def run_tui():
         return result if result else default
     
     def draw_box(stdscr, y, x, h, w, title=""):
-        stdscr.addch(y, x, curses.ACS_ULCORNER)
-        stdscr.addch(y, x + w - 1, curses.ACS_URCORNER)
-        stdscr.addch(y + h - 1, x, curses.ACS_LLCORNER)
-        stdscr.addch(y + h - 1, x + w - 1, curses.ACS_LRCORNER)
-        for i in range(1, w - 1):
-            stdscr.addch(y, x + i, curses.ACS_HLINE)
-            stdscr.addch(y + h - 1, x + i, curses.ACS_HLINE)
-        for i in range(1, h - 1):
-            stdscr.addch(y + i, x, curses.ACS_VLINE)
-            stdscr.addch(y + i, x + w - 1, curses.ACS_VLINE)
-        if title:
-            stdscr.addstr(y, x + 2, f" {title} ")
+        max_h, max_w = stdscr.getmaxyx()
+        if y + h >= max_h or x + w >= max_w or y < 0 or x < 0:
+            return
+        try:
+            stdscr.addch(y, x, curses.ACS_ULCORNER)
+            stdscr.addch(y, x + w - 1, curses.ACS_URCORNER)
+            stdscr.addch(y + h - 1, x, curses.ACS_LLCORNER)
+            stdscr.addch(y + h - 1, x + w - 1, curses.ACS_LRCORNER)
+            for i in range(1, w - 1):
+                stdscr.addch(y, x + i, curses.ACS_HLINE)
+                stdscr.addch(y + h - 1, x + i, curses.ACS_HLINE)
+            for i in range(1, h - 1):
+                stdscr.addch(y + i, x, curses.ACS_VLINE)
+                stdscr.addch(y + i, x + w - 1, curses.ACS_VLINE)
+            if title:
+                stdscr.addstr(y, x + 2, f" {title} ")
+        except curses.error:
+            pass
     
     def wizard_step(stdscr, step):
         nonlocal current_step
@@ -469,63 +489,75 @@ def run_tui():
             stdscr.clear()
             h, w = stdscr.getmaxyx()
             
-            ascii_art = [
-                "██╗   ██╗██╗     ███████╗███████╗███████╗",
-                "██║   ██║██║     ██╔════╝██╔════╝██╔════╝",
-                "██║   ██║██║     █████╗  ███████╗███████╗",
-                "╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║",
-                " ╚████╔╝ ███████╗███████╗███████║███████║",
-                "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
-            ]
+            if h < 20 or w < 50:
+                stdscr.addstr(0, 0, "Terminal too small!")
+                stdscr.addstr(1, 0, f"Need: 50x20, have: {w}x{h}")
+                stdscr.addstr(2, 0, "Resize and press any key...")
+                stdscr.refresh()
+                stdscr.getch()
+                continue
             
-            stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
-            for i, line in enumerate(ascii_art):
-                x = max(0, (w - len(line)) // 2)
-                if x + len(line) < w:
-                    stdscr.addstr(1 + i, x, line)
-            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+            try:
+                ascii_art = [
+                    "██╗   ██╗██╗     ███████╗███████╗███████╗",
+                    "██║   ██║██║     ██╔════╝██╔════╝██╔════╝",
+                    "██║   ██║██║     █████╗  ███████╗███████╗",
+                    "╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║",
+                    " ╚████╔╝ ███████╗███████╗███████║███████║",
+                    "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
+                ]
             
-            subtitle = "Reality VPN Client v2.0"
-            stdscr.addstr(8, max(0, (w - len(subtitle)) // 2), subtitle)
+                stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+                for i, line in enumerate(ascii_art):
+                    x = max(0, (w - len(line)) // 2)
+                    if x + len(line) < w:
+                        stdscr.addstr(1 + i, x, line)
+                stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+                
+                subtitle = "Reality VPN Client v2.0"
+                stdscr.addstr(8, max(0, (w - len(subtitle)) // 2), subtitle)
+                
+                draw_box(stdscr, 10, 1, 6, min(w - 2, 50), "Status")
+                
+                if client.connected:
+                    stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
+                    stdscr.addstr(12, 4, " ● CONNECTED ")
+                    stdscr.attroff(curses.color_pair(5) | curses.A_BOLD)
+                else:
+                    stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
+                    stdscr.addstr(12, 4, " ○ DISCONNECTED ")
+                    stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
+                
+                stdscr.addstr(14, 4, f"Server: {client.server_ip}:{client.server_port}")
+                
+                draw_box(stdscr, 17, 1, 5, min(w - 2, 50), "Connection Info")
+                stdscr.addstr(19, 4, f"Proxy: 127.0.0.1:{PROXY_PORT}")
+                uuid_short = client.uuid[:16] + "..." if len(client.uuid) > 16 else client.uuid
+                stdscr.addstr(20, 4, f"UUID: {uuid_short}")
+                
+                draw_box(stdscr, 23, 1, 4, min(w - 2, 50), "Menu")
+                
+                if not client.connected:
+                    stdscr.attron(curses.color_pair(2))
+                    stdscr.addstr(25, 4, "[C] Connect")
+                    stdscr.attroff(curses.color_pair(2))
+                else:
+                    stdscr.attron(curses.color_pair(3))
+                    stdscr.addstr(25, 4, "[D] Disconnect")
+                    stdscr.attroff(curses.color_pair(3))
+                
+                stdscr.addstr(25, 20, "[T] Test   [R] Reconfigure   [Q] Quit")
+                
+                if log_messages and h > 32:
+                    draw_box(stdscr, 28, 1, min(6, len(log_messages) + 2), min(w - 2, 50), "Log")
+                    for i, msg in enumerate(log_messages[-4:]):
+                        if 29 + i < h - 1:
+                            stdscr.addstr(29 + i, 4, msg[:w - 8])
             
-            draw_box(stdscr, 10, 1, 6, min(w - 2, 50), "Status")
-            
-            if client.connected:
-                stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
-                stdscr.addstr(12, 4, " ● CONNECTED ")
-                stdscr.attroff(curses.color_pair(5) | curses.A_BOLD)
-            else:
-                stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
-                stdscr.addstr(12, 4, " ○ DISCONNECTED ")
-                stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
-            
-            stdscr.addstr(14, 4, f"Server: {client.server_ip}:{client.server_port}")
-            
-            draw_box(stdscr, 17, 1, 5, min(w - 2, 50), "Connection Info")
-            stdscr.addstr(19, 4, f"Proxy: 127.0.0.1:{PROXY_PORT}")
-            uuid_short = client.uuid[:16] + "..." if len(client.uuid) > 16 else client.uuid
-            stdscr.addstr(20, 4, f"UUID: {uuid_short}")
-            
-            draw_box(stdscr, 23, 1, 4, min(w - 2, 50), "Menu")
-            
-            if not client.connected:
-                stdscr.attron(curses.color_pair(2))
-                stdscr.addstr(25, 4, "[C] Connect")
-                stdscr.attroff(curses.color_pair(2))
-            else:
-                stdscr.attron(curses.color_pair(3))
-                stdscr.addstr(25, 4, "[D] Disconnect")
-                stdscr.attroff(curses.color_pair(3))
-            
-            stdscr.addstr(25, 20, "[T] Test   [R] Reconfigure   [Q] Quit")
-            
-            if log_messages:
-                draw_box(stdscr, 28, 1, min(6, len(log_messages) + 2), min(w - 2, 50), "Log")
-                for i, msg in enumerate(log_messages[-4:]):
-                    stdscr.addstr(29 + i, 4, msg[:w - 8])
+            except curses.error:
+                pass
             
             stdscr.refresh()
-            
             key = stdscr.getch()
             
             if key == ord('c') or key == ord('C'):

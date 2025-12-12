@@ -21,18 +21,32 @@ class Cipher:
         self.counter = 0
         self.buf = b''
 
-    def _gen(self):
-        self.buf += hashlib.sha256(self.key + self.nonce + self.counter.to_bytes(8, 'big')).digest()
+    def _gen_block(self):
+        block = hashlib.sha256(self.key + self.nonce + self.counter.to_bytes(8, 'big')).digest()
         self.counter += 1
+        return block
 
     def process(self, data):
-        out = bytearray()
-        for b in data:
-            if not self.buf:
-                self._gen()
-            out.append(b ^ self.buf[0])
-            self.buf = self.buf[1:]
-        return bytes(out)
+        result = bytearray(len(data))
+        pos = 0
+        
+        if self.buf:
+            use = min(len(self.buf), len(data))
+            for i in range(use):
+                result[i] = data[i] ^ self.buf[i]
+            self.buf = self.buf[use:]
+            pos = use
+        
+        while pos < len(data):
+            block = self._gen_block()
+            use = min(32, len(data) - pos)
+            for i in range(use):
+                result[pos + i] = data[pos + i] ^ block[i]
+            if use < 32:
+                self.buf = block[use:]
+            pos += use
+        
+        return bytes(result)
 
 
 def make_handshake(sni):
