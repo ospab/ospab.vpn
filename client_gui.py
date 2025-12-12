@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import asyncio
 import hashlib
 import os
@@ -14,6 +15,38 @@ if sys.platform == 'win32':
 
 MAGIC_HEADER = b'\x56\x4c\x45\x53'
 PROXY_PORT = 10808
+
+
+def load_yaml_config(path):
+    """Load config from YAML file without external dependencies"""
+    config = {}
+    current_section = None
+    
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.rstrip()
+                if not line or line.strip().startswith('#'):
+                    continue
+                
+                if not line.startswith(' ') and line.endswith(':'):
+                    current_section = line[:-1].strip()
+                    config[current_section] = {}
+                    continue
+                
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    
+                    if current_section:
+                        config[current_section][key] = value
+                    else:
+                        config[key] = value
+        
+        return config
+    except Exception:
+        return None
 
 
 class Cipher:
@@ -346,10 +379,20 @@ def validate_uuid(value):
     return all(c in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in value)
 
 
-def run_tui():
+def run_tui(config_data=None):
     import curses
     
     client = VPNClient()
+    
+    # Apply config if provided
+    if config_data:
+        server = config_data.get('server', {})
+        if isinstance(server, dict):
+            client.server_ip = server.get('ip', '')
+            client.server_port = int(server.get('port', 4433))
+            client.uuid = server.get('uuid', '')
+            client.sni = server.get('sni', 'www.microsoft.com')
+    
     status = "Disconnected"
     log_messages = []
     current_step = 0
@@ -495,8 +538,10 @@ def run_tui():
         curses.curs_set(0)
         stdscr.nodelay(False)
         
-        if not run_wizard(stdscr):
-            return
+        # Skip wizard if config was loaded
+        if not (client.server_ip and client.uuid):
+            if not run_wizard(stdscr):
+                return
         
         log("checking connection...")
         stdscr.clear()
@@ -637,11 +682,21 @@ def run_tui():
     curses.wrapper(main_loop)
 
 
-def run_gui():
+def run_gui(config_data=None):
     import tkinter as tk
     from tkinter import ttk, messagebox
     
     client = VPNClient()
+    
+    # Apply config if provided
+    if config_data:
+        server = config_data.get('server', {})
+        if isinstance(server, dict):
+            client.server_ip = server.get('ip', '')
+            client.server_port = int(server.get('port', 4433))
+            client.uuid = server.get('uuid', '')
+            client.sni = server.get('sni', 'www.microsoft.com')
+    
     wizard_complete = [False]
     
     def show_wizard():
@@ -959,17 +1014,31 @@ def run_gui():
 
 
 if __name__ == '__main__':
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='ospab.vpn client gui')
+    parser.add_argument('-c', '--config', type=str, help='path to config.yml')
+    args = parser.parse_args()
+    
+    # Pre-load config if specified
+    config_data = None
+    if args.config:
+        config_data = load_yaml_config(args.config)
+        if config_data:
+            print(f'[+] Loaded config from {args.config}')
+        else:
+            print(f'[-] Failed to load config: {args.config}')
+    
     if sys.platform == 'win32':
-        run_gui()
+        run_gui(config_data)
     elif sys.platform == 'darwin':
-        run_gui()
+        run_gui(config_data)
     else:
         if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
             try:
                 import tkinter as _tk_test
                 _tk_test.Tk().destroy()
-                run_gui()
+                run_gui(config_data)
             except Exception:
-                run_tui()
+                run_tui(config_data)
         else:
-            run_tui()
+            run_tui(config_data)

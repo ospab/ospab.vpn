@@ -1,0 +1,11 @@
+# ospab.vpn client configuration
+# copy this file to config.yml and edit values
+
+server:
+  ip: "127.0.0.1"
+  port: 4433
+  uuid: "your-uuid-here"
+  sni: "www.microsoft.com"
+
+proxy:
+  port: 10808

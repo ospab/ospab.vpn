@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import asyncio
 import hashlib
 import os
@@ -13,6 +14,58 @@ VLESS_UUID = os.environ.get('UUID', '')
 REALITY_SNI = os.environ.get('SNI', 'www.microsoft.com')
 MAGIC_HEADER = b'\x56\x4c\x45\x53'
 PROXY_PORT = 10808
+
+
+def load_yaml_config(path):
+    """Load config from YAML file without external dependencies"""
+    global SERVER_IP, SERVER_PORT, VLESS_UUID, REALITY_SNI, PROXY_PORT
+    
+    config = {}
+    current_section = None
+    
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.rstrip()
+                if not line or line.strip().startswith('#'):
+                    continue
+                
+                # Check for section (no leading spaces, ends with :)
+                if not line.startswith(' ') and line.endswith(':'):
+                    current_section = line[:-1].strip()
+                    config[current_section] = {}
+                    continue
+                
+                # Key-value pair
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    
+                    if current_section:
+                        config[current_section][key] = value
+                    else:
+                        config[key] = value
+        
+        # Extract values
+        server = config.get('server', {})
+        if isinstance(server, dict):
+            SERVER_IP = server.get('ip', SERVER_IP)
+            SERVER_PORT = int(server.get('port', SERVER_PORT))
+            VLESS_UUID = server.get('uuid', VLESS_UUID)
+            REALITY_SNI = server.get('sni', REALITY_SNI)
+        
+        proxy = config.get('proxy', {})
+        if isinstance(proxy, dict):
+            PROXY_PORT = int(proxy.get('port', PROXY_PORT))
+        
+        return True
+    except FileNotFoundError:
+        print(f'[-] Config file not found: {path}')
+        return False
+    except Exception as e:
+        print(f'[-] Error loading config: {e}')
+        return False
 
 
 class Cipher:
@@ -283,18 +336,33 @@ def show_banner():
 def get_config():
     global SERVER_IP, SERVER_PORT, VLESS_UUID, REALITY_SNI
     
-    if len(sys.argv) == 5:
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='ospab.vpn client')
+    parser.add_argument('-c', '--config', type=str, help='path to config.yml')
+    parser.add_argument('positional', nargs='*', help='server_ip port uuid sni')
+    
+    args = parser.parse_args()
+    
+    # Load from config file if specified
+    if args.config:
+        if load_yaml_config(args.config):
+            print(f'[+] Loaded config from {args.config}')
+            return True
+        return False
+    
+    # Load from positional arguments (legacy)
+    if len(args.positional) == 4:
         try:
-            SERVER_IP = sys.argv[1]
-            SERVER_PORT = int(sys.argv[2])
-            VLESS_UUID = sys.argv[3]
-            REALITY_SNI = sys.argv[4]
+            SERVER_IP = args.positional[0]
+            SERVER_PORT = int(args.positional[1])
+            VLESS_UUID = args.positional[2]
+            REALITY_SNI = args.positional[3]
             return True
         except ValueError:
             print('[-] Port must be a number')
             return False
-    elif len(sys.argv) > 1:
-        print('Usage: client.py <server_ip> <port> <uuid> <sni>')
+    elif len(args.positional) > 0:
+        print('Usage: client.py [-c config.yml] | <server_ip> <port> <uuid> <sni>')
         return False
     
     show_banner()
