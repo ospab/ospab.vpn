@@ -1,38 +1,32 @@
 #!/usr/bin/env python3
-"""VLESS-Reality VPN Server"""
-
 import asyncio
 import hashlib
 import logging
 import os
 import socket
+import struct
 import sys
 import time
 import uuid
-from urllib.parse import urlparse
 
-# --- Configuration ---
 LISTEN_PORT = int(os.environ.get('PORT', 4433))
 VLESS_UUID = os.environ.get('UUID', '')
 REALITY_SNI = os.environ.get('SNI', 'www.microsoft.com')
 MAGIC_HEADER = b'\x56\x4c\x45\x53'
 
-# Security
 MAX_FAILED_ATTEMPTS = 5
 BAN_TIME = 3600
 TIMEOUT = 300
 
-# State
 failed_attempts = {}
 banned_ips = set()
-connections = []
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('vless')
 
 
 class Cipher:
-    def __init__(self, key: str, nonce: bytes):
+    def __init__(self, key, nonce):
         self.key = key.encode() if isinstance(key, str) else key
         self.nonce = nonce
         self.counter = 0
@@ -42,7 +36,7 @@ class Cipher:
         self.buf += hashlib.sha256(self.key + self.nonce + self.counter.to_bytes(8, 'big')).digest()
         self.counter += 1
 
-    def process(self, data: bytes) -> bytes:
+    def process(self, data):
         out = bytearray()
         for b in data:
             if not self.buf:
@@ -52,7 +46,7 @@ class Cipher:
         return bytes(out)
 
 
-def check_ban(ip: str) -> bool:
+def check_ban(ip):
     if ip in banned_ips:
         if ip in failed_attempts:
             _, until = failed_attempts[ip]
@@ -63,7 +57,7 @@ def check_ban(ip: str) -> bool:
     return True
 
 
-def record_fail(ip: str):
+def record_fail(ip):
     if ip not in failed_attempts:
         failed_attempts[ip] = [1, 0]
     else:
@@ -72,6 +66,165 @@ def record_fail(ip: str):
         failed_attempts[ip][1] = time.time() + BAN_TIME
         banned_ips.add(ip)
         log.warning(f'Banned {ip}')
+
+
+class StreamInfo:
+    def __init__(self, remote_writer):
+        self.remote_writer = remote_writer
+        self.queue = asyncio.Queue()
+
+
+class MultiplexServer:
+    def __init__(self, reader, writer, cipher, addr):
+        self.reader = reader
+        self.writer = writer
+        self.cipher = cipher
+        self.addr = addr
+        self.streams = {}
+        self.lock = asyncio.Lock()
+
+    async def send_frame(self, stream_id, data):
+        async with self.lock:
+            header = struct.pack('>IH', stream_id, len(data))
+            self.writer.write(self.cipher.process(header + data))
+            await self.writer.drain()
+
+    async def close_stream(self, stream_id):
+        try:
+            await self.send_frame(stream_id, b'')
+        except Exception:
+            pass
+        if stream_id in self.streams:
+            info = self.streams.pop(stream_id)
+            try:
+                info.remote_writer.close()
+            except Exception:
+                pass
+
+    async def handle_stream(self, stream_id, initial_data):
+        text = initial_data.decode('utf-8', errors='ignore')
+        lines = text.split('\n')
+        req = lines[0].strip().split(' ')
+        if len(req) < 2:
+            await self.close_stream(stream_id)
+            return
+
+        method, url = req[0], req[1]
+        host, port = None, 80
+
+        try:
+            if method == 'CONNECT':
+                if ':' in url:
+                    host, p = url.split(':')
+                    port = int(p)
+                else:
+                    host, port = url, 443
+            else:
+                if '://' in url:
+                    from urllib.parse import urlparse
+                    p = urlparse(url)
+                    host = p.hostname
+                    port = p.port or 80
+                else:
+                    for line in lines:
+                        if line.lower().startswith('host:'):
+                            h = line.split(':', 1)[1].strip()
+                            if ':' in h:
+                                host, port = h.rsplit(':', 1)
+                                port = int(port)
+                            else:
+                                host = h
+                            break
+
+            if not host:
+                await self.close_stream(stream_id)
+                return
+
+            log.info(f'[{stream_id}] {method} {host}:{port}')
+            
+            remote_r, remote_w = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=10
+            )
+
+            stream_info = StreamInfo(remote_w)
+            self.streams[stream_id] = stream_info
+
+            if method == 'CONNECT':
+                await self.send_frame(stream_id, b'HTTP/1.1 200 Connection Established\r\n\r\n')
+            else:
+                remote_w.write(initial_data)
+                await remote_w.drain()
+
+            async def from_remote():
+                try:
+                    while True:
+                        data = await remote_r.read(32768)
+                        if not data:
+                            break
+                        await self.send_frame(stream_id, data)
+                except Exception:
+                    pass
+                finally:
+                    await self.close_stream(stream_id)
+
+            asyncio.create_task(from_remote())
+
+        except Exception as e:
+            log.debug(f'Stream {stream_id} error: {e}')
+            err = f'HTTP/1.1 502 Bad Gateway\r\n\r\n{e}'
+            try:
+                await self.send_frame(stream_id, err.encode())
+            except Exception:
+                pass
+            await self.close_stream(stream_id)
+
+    async def run(self):
+        buf = b''
+        try:
+            while True:
+                chunk = await asyncio.wait_for(self.reader.read(65536), timeout=TIMEOUT)
+                if not chunk:
+                    break
+                
+                buf += self.cipher.process(chunk)
+                
+                while len(buf) >= 6:
+                    stream_id, length = struct.unpack('>IH', buf[:6])
+                    if len(buf) < 6 + length:
+                        break
+                    
+                    data = buf[6:6 + length]
+                    buf = buf[6 + length:]
+                    
+                    if length == 0:
+                        if stream_id in self.streams:
+                            info = self.streams.pop(stream_id)
+                            try:
+                                info.remote_writer.close()
+                            except Exception:
+                                pass
+                        continue
+                    
+                    if stream_id in self.streams:
+                        try:
+                            self.streams[stream_id].remote_writer.write(data)
+                            await self.streams[stream_id].remote_writer.drain()
+                        except Exception:
+                            await self.close_stream(stream_id)
+                    else:
+                        asyncio.create_task(self.handle_stream(stream_id, data))
+                        
+        except asyncio.TimeoutError:
+            log.info(f'Timeout: {self.addr}')
+        except Exception as e:
+            log.debug(f'Error: {e}')
+        finally:
+            for sid in list(self.streams.keys()):
+                try:
+                    self.streams[sid].remote_writer.close()
+                except Exception:
+                    pass
+            self.streams.clear()
 
 
 async def handle(reader, writer):
@@ -83,7 +236,6 @@ async def handle(reader, writer):
         return
 
     try:
-        # Handshake
         nonce = await asyncio.wait_for(reader.read(16), timeout=10)
         if len(nonce) < 16:
             writer.close()
@@ -99,36 +251,10 @@ async def handle(reader, writer):
             writer.close()
             return
 
-        log.info(f'Client connected: {addr}')
-        conn = {'writer': writer, 'cipher': cipher, 'addr': addr}
-        connections.append(conn)
-
-        try:
-            while True:
-                data = await asyncio.wait_for(reader.read(8192), timeout=TIMEOUT)
-                if not data:
-                    break
-
-                plain = cipher.process(data)
-                
-                # Keep-alive
-                if plain == b'PING':
-                    writer.write(cipher.process(b'PONG'))
-                    await writer.drain()
-                    continue
-                if plain == b'PONG':
-                    continue
-
-                text = plain.decode('utf-8', errors='ignore')
-                
-                # Proxy request
-                if text.startswith(('GET ', 'POST ', 'CONNECT ', 'HEAD ', 'PUT ', 'DELETE ')):
-                    await handle_proxy(reader, writer, cipher, text)
-                    break
-                    
-        finally:
-            if conn in connections:
-                connections.remove(conn)
+        log.info(f'Connected: {addr}')
+        
+        mux = MultiplexServer(reader, writer, cipher, addr)
+        await mux.run()
 
     except asyncio.TimeoutError:
         pass
@@ -139,102 +265,14 @@ async def handle(reader, writer):
             writer.close()
             try:
                 await writer.wait_closed()
-            except:
+            except Exception:
                 pass
-
-
-async def handle_proxy(client_reader, client_writer, cipher, request: str):
-    """Handle HTTP/HTTPS proxy request"""
-    lines = request.split('\n')
-    req = lines[0].strip().split(' ')
-    if len(req) < 2:
-        return
-    
-    method, url = req[0], req[1]
-    host, port = None, 80
-
-    try:
-        if method == 'CONNECT':
-            if ':' in url:
-                host, port = url.split(':')
-                port = int(port)
-            else:
-                host = url
-                port = 443
-        else:
-            if '://' in url:
-                p = urlparse(url)
-                host = p.hostname
-                port = p.port or 80
-            else:
-                for line in lines:
-                    if line.lower().startswith('host:'):
-                        h = line.split(':', 1)[1].strip()
-                        if ':' in h:
-                            host, port = h.rsplit(':', 1)
-                            port = int(port)
-                        else:
-                            host = h
-                        break
-
-        if not host:
-            return
-
-        log.info(f'Proxy: {method} {host}:{port}')
-        
-        remote_reader, remote_writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), timeout=10
-        )
-
-        if method == 'CONNECT':
-            client_writer.write(cipher.process(b'HTTP/1.1 200 Connection Established\r\n\r\n'))
-            await client_writer.drain()
-        else:
-            remote_writer.write(request.encode())
-            await remote_writer.drain()
-
-        async def to_remote():
-            try:
-                while True:
-                    data = await client_reader.read(4096)
-                    if not data:
-                        break
-                    # Decrypt data from client before sending to target
-                    decrypted = cipher.process(data)
-                    remote_writer.write(decrypted)
-                    await remote_writer.drain()
-            except:
-                pass
-            finally:
-                try:
-                    remote_writer.close()
-                except:
-                    pass
-
-        async def to_client():
-            try:
-                while True:
-                    data = await remote_reader.read(4096)
-                    if not data:
-                        break
-                    client_writer.write(cipher.process(data))
-                    await client_writer.drain()
-            except:
-                pass
-
-        await asyncio.gather(to_remote(), to_client())
-        
-    except Exception as e:
-        err = f'HTTP/1.1 502 Bad Gateway\r\n\r\n{e}'
-        client_writer.write(cipher.process(err.encode()))
-        await client_writer.drain()
+        log.info(f'Disconnected: {addr}')
 
 
 def get_config():
-    """Get server configuration from args or interactive input"""
     global VLESS_UUID, LISTEN_PORT, REALITY_SNI
     
-    # CLI args: server.py <port> <uuid> <sni>
     if len(sys.argv) == 4:
         try:
             LISTEN_PORT = int(sys.argv[1])
@@ -242,32 +280,32 @@ def get_config():
             REALITY_SNI = sys.argv[3]
             return True
         except ValueError:
-            print('[-] Error: port must be a number')
+            print('[-] Port must be a number')
             return False
     elif len(sys.argv) > 1:
-        print('[-] Error: provide all arguments or none')
-        print('    Usage: server.py <port> <uuid> <sni>')
-        print('    Example: server.py 4433 my-secret-key www.google.com')
+        print('Usage: server.py <port> <uuid> <sni>')
         return False
     
-    # Interactive input
-    print('\n=== Server Configuration ===')
+    print('\n' + '=' * 50)
+    print('       VLESS-Reality Server Configuration')
+    print('=' * 50)
     
     try:
-        port_in = input('Port [4433]: ').strip()
+        port_in = input('\n[?] Port [4433]: ').strip()
         if port_in:
             LISTEN_PORT = int(port_in)
     except ValueError:
         print('[-] Invalid port')
         return False
     
-    uuid_in = input('UUID (leave empty to generate): ').strip()
+    uuid_in = input('[?] UUID (empty = generate): ').strip()
     if uuid_in:
         VLESS_UUID = uuid_in
     else:
         VLESS_UUID = str(uuid.uuid4())
+        print(f'[+] Generated UUID: {VLESS_UUID}')
     
-    sni_in = input('SNI [www.microsoft.com]: ').strip()
+    sni_in = input('[?] SNI [www.microsoft.com]: ').strip()
     if sni_in:
         REALITY_SNI = sni_in
     
@@ -275,29 +313,31 @@ def get_config():
 
 
 async def main():
-    global VLESS_UUID, LISTEN_PORT, REALITY_SNI
-    
     if not get_config():
         return
 
-    # Get public IP
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(('8.8.8.8', 80))
         ip = s.getsockname()[0]
         s.close()
-    except:
+    except Exception:
         ip = '0.0.0.0'
 
     print(f'''
-╔══════════════════════════════════════════╗
-║         VLESS-Reality Server             ║
-╠══════════════════════════════════════════╣
-║  IP:   {ip:<33}║
-║  Port: {LISTEN_PORT:<33}║
-║  UUID: {VLESS_UUID:<33}║
-║  SNI:  {REALITY_SNI:<33}║
-╚══════════════════════════════════════════╝
+╔══════════════════════════════════════════════════╗
+║           VLESS-Reality VPN Server               ║
+╠══════════════════════════════════════════════════╣
+║  Status:  RUNNING                                ║
+╠══════════════════════════════════════════════════╣
+║  IP:      {ip:<38} ║
+║  Port:    {LISTEN_PORT:<38} ║
+║  UUID:    {VLESS_UUID:<38} ║
+║  SNI:     {REALITY_SNI:<38} ║
+╠══════════════════════════════════════════════════╣
+║  Share this with client:                         ║
+║  {ip}:{LISTEN_PORT} | {VLESS_UUID[:20]}...       ║
+╚══════════════════════════════════════════════════╝
 ''')
 
     server = await asyncio.start_server(handle, '0.0.0.0', LISTEN_PORT)
@@ -310,4 +350,4 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print('\nStopped')
+        print('\n[!] Server stopped')

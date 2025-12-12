@@ -1,3 +1,3 @@
 @echo off
-python client_gui.py
-pause
+cd /d "%~dp0"
+start "" pythonw client_gui.py
