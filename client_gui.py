@@ -115,7 +115,7 @@ class MultiplexClient:
         buf = b''
         try:
             while self.connected:
-                chunk = await self.reader.read(131072)
+                chunk = await self.reader.read(65536)
                 if not chunk:
                     break
                 
@@ -232,7 +232,7 @@ class VPNClient:
             async def to_remote():
                 try:
                     while True:
-                        data = await local_reader.read(65536)
+                        data = await local_reader.read(32768)
                         if not data:
                             break
                         await self.mux.send_frame(stream_id, data)
@@ -249,13 +249,9 @@ class VPNClient:
                         if data is None:
                             break
                         local_writer.write(data)
+                        await local_writer.drain()
                 except Exception:
                     pass
-                finally:
-                    try:
-                        await local_writer.drain()
-                    except Exception:
-                        pass
 
             await asyncio.gather(to_remote(), to_local())
             

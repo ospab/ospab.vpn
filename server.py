@@ -184,7 +184,7 @@ class MultiplexServer:
             async def from_remote():
                 try:
                     while True:
-                        data = await remote_r.read(65536)
+                        data = await remote_r.read(32768)
                         if not data:
                             break
                         await self.send_frame(stream_id, data)
@@ -208,7 +208,7 @@ class MultiplexServer:
         buf = b''
         try:
             while True:
-                chunk = await asyncio.wait_for(self.reader.read(131072), timeout=TIMEOUT)
+                chunk = await asyncio.wait_for(self.reader.read(65536), timeout=TIMEOUT)
                 if not chunk:
                     break
                 

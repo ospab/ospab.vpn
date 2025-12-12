@@ -110,7 +110,7 @@ class MultiplexClient:
         buf = b''
         try:
             while self.connected:
-                chunk = await self.reader.read(131072)
+                chunk = await self.reader.read(65536)
                 if not chunk:
                     break
                 
@@ -187,7 +187,7 @@ async def proxy_handler(local_reader, local_writer):
         async def to_remote():
             try:
                 while True:
-                    data = await local_reader.read(65536)
+                    data = await local_reader.read(32768)
                     if not data:
                         break
                     await mux.send_frame(stream_id, data)
@@ -204,13 +204,9 @@ async def proxy_handler(local_reader, local_writer):
                     if data is None:
                         break
                     local_writer.write(data)
+                    await local_writer.drain()
             except Exception:
                 pass
-            finally:
-                try:
-                    await local_writer.drain()
-                except Exception:
-                    pass
 
         await asyncio.gather(to_remote(), to_local())
         
