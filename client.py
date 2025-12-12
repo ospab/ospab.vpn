@@ -161,22 +161,62 @@ def set_system_proxy(enable: bool):
             print('[+] Proxy disabled')
 
 
+def get_config():
+    """Get client configuration from args or interactive input"""
+    global SERVER_IP, SERVER_PORT, VLESS_UUID, REALITY_SNI
+    
+    # CLI args: client.py <server_ip> <port> <uuid> <sni>
+    if len(sys.argv) == 5:
+        try:
+            SERVER_IP = sys.argv[1]
+            SERVER_PORT = int(sys.argv[2])
+            VLESS_UUID = sys.argv[3]
+            REALITY_SNI = sys.argv[4]
+            return True
+        except ValueError:
+            print('[-] Error: port must be a number')
+            return False
+    elif len(sys.argv) > 1:
+        print('[-] Error: provide all arguments or none')
+        print('    Usage: client.py <server_ip> <port> <uuid> <sni>')
+        print('    Example: client.py 1.2.3.4 4433 my-secret-key www.google.com')
+        return False
+    
+    # Interactive input
+    print('\n=== Client Configuration ===')
+    
+    ip_in = input('Server IP: ').strip()
+    if not ip_in:
+        print('[-] Server IP required')
+        return False
+    SERVER_IP = ip_in
+    
+    try:
+        port_in = input('Port [4433]: ').strip()
+        if port_in:
+            SERVER_PORT = int(port_in)
+    except ValueError:
+        print('[-] Invalid port')
+        return False
+    
+    uuid_in = input('UUID: ').strip()
+    if not uuid_in:
+        print('[-] UUID required')
+        return False
+    VLESS_UUID = uuid_in
+    
+    sni_in = input('SNI [www.microsoft.com]: ').strip()
+    if sni_in:
+        REALITY_SNI = sni_in
+    
+    return True
+
+
 async def main():
     global SERVER_IP, SERVER_PORT, VLESS_UUID, REALITY_SNI
     
-    # Parse CLI: client.py <uuid> [server] [port]
-    if len(sys.argv) > 1:
-        VLESS_UUID = sys.argv[1]
-    if len(sys.argv) > 2:
-        SERVER_IP = sys.argv[2]
-    if len(sys.argv) > 3:
-        SERVER_PORT = int(sys.argv[3])
-    
-    if not VLESS_UUID:
-        VLESS_UUID = input('UUID: ').strip()
-        if not VLESS_UUID:
-            print('UUID required')
-            return
+    if not get_config():
+        return
 
     print(f'''
 ╔══════════════════════════════════════════╗

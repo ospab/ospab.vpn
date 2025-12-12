@@ -230,17 +230,55 @@ async def handle_proxy(client_reader, client_writer, cipher, request: str):
         await client_writer.drain()
 
 
+def get_config():
+    """Get server configuration from args or interactive input"""
+    global VLESS_UUID, LISTEN_PORT, REALITY_SNI
+    
+    # CLI args: server.py <port> <uuid> <sni>
+    if len(sys.argv) == 4:
+        try:
+            LISTEN_PORT = int(sys.argv[1])
+            VLESS_UUID = sys.argv[2]
+            REALITY_SNI = sys.argv[3]
+            return True
+        except ValueError:
+            print('[-] Error: port must be a number')
+            return False
+    elif len(sys.argv) > 1:
+        print('[-] Error: provide all arguments or none')
+        print('    Usage: server.py <port> <uuid> <sni>')
+        print('    Example: server.py 4433 my-secret-key www.google.com')
+        return False
+    
+    # Interactive input
+    print('\n=== Server Configuration ===')
+    
+    try:
+        port_in = input('Port [4433]: ').strip()
+        if port_in:
+            LISTEN_PORT = int(port_in)
+    except ValueError:
+        print('[-] Invalid port')
+        return False
+    
+    uuid_in = input('UUID (leave empty to generate): ').strip()
+    if uuid_in:
+        VLESS_UUID = uuid_in
+    else:
+        VLESS_UUID = str(uuid.uuid4())
+    
+    sni_in = input('SNI [www.microsoft.com]: ').strip()
+    if sni_in:
+        REALITY_SNI = sni_in
+    
+    return True
+
+
 async def main():
     global VLESS_UUID, LISTEN_PORT, REALITY_SNI
     
-    # CLI args: server.py [port] [uuid]
-    if len(sys.argv) > 1 and sys.argv[1].isdigit():
-        LISTEN_PORT = int(sys.argv[1])
-    if len(sys.argv) > 2:
-        VLESS_UUID = sys.argv[2]
-    
-    if not VLESS_UUID:
-        VLESS_UUID = str(uuid.uuid4())
+    if not get_config():
+        return
 
     # Get public IP
     try:
