@@ -1,457 +1,229 @@
 #!/usr/bin/env python3
-# vless_reality_client.py
+"""VLESS-Reality VPN Client"""
 
 import asyncio
+import hashlib
+import os
 import random
 import sys
-import hashlib
-import logging
-import os
 
-# --- Configuration (Configuration) ---
-SERVER_IP = '127.0.0.1' # Change to your server IP
-SERVER_PORT = 4433
-REALITY_SNI = "www.microsoft.com"
-# UUID нужно скопировать с сервера или указать через аргумент командной строки
-VLESS_UUID = None
-VLESS_MAGIC_HEADER = b'\x56\x4c\x45\x53'
-# Keep-alive settings
-KEEP_ALIVE_INTERVAL = 60  # seconds 
+# --- Configuration ---
+SERVER_IP = os.environ.get('SERVER', '127.0.0.1')
+SERVER_PORT = int(os.environ.get('PORT', 4433))
+VLESS_UUID = os.environ.get('UUID', '')
+REALITY_SNI = os.environ.get('SNI', 'www.microsoft.com')
+MAGIC_HEADER = b'\x56\x4c\x45\x53'
+PROXY_PORT = 10808
 
-# --- Interactive Setup ---
-def configure_client():
-    global SERVER_IP, SERVER_PORT, REALITY_SNI, VLESS_UUID
-    
-    print("\n--- Client Configuration ---")
-    
-    # Server IP
-    ip_in = input(f"Server IP [{SERVER_IP}]: ").strip()
-    if ip_in:
-        SERVER_IP = ip_in
-        
-    # Server Port
-    p_in = input(f"Server Port [{SERVER_PORT}]: ").strip()
-    if p_in.isdigit():
-        SERVER_PORT = int(p_in)
-        
-    # UUID
-    if len(sys.argv) > 1:
-        VLESS_UUID = sys.argv[1]
-    
-    if not VLESS_UUID:
-        u_in = input("VLESS UUID (Required): ").strip()
-        if u_in:
-            VLESS_UUID = u_in
-        else:
-            print("[!] Error: UUID is required!")
-            sys.exit(1)
-            
-    # SNI
-    s_in = input(f"Reality SNI [{REALITY_SNI}]: ").strip()
-    if s_in:
-        REALITY_SNI = s_in
-        
-    print("\n[~] Configuration applied.")
 
-# --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
-)
-logger = logging.getLogger("VLESS_Client")
-
-# --- Crypto (Stream Cipher) ---
-class StreamCipher:
-    """
-    Simple Hash-based Stream Cipher (XOR) using SHA256.
-    Provides confidentiality and high entropy for traffic.
-    """
+class Cipher:
     def __init__(self, key: str, nonce: bytes):
-        self.key = key.encode()
+        self.key = key.encode() if isinstance(key, str) else key
         self.nonce = nonce
         self.counter = 0
-        self.buffer = b''
+        self.buf = b''
 
-    def _refill_buffer(self):
-        # Generate next block of keystream: SHA256(key + nonce + counter)
-        data = self.key + self.nonce + self.counter.to_bytes(8, 'big')
-        self.buffer += hashlib.sha256(data).digest()
+    def _gen(self):
+        self.buf += hashlib.sha256(self.key + self.nonce + self.counter.to_bytes(8, 'big')).digest()
         self.counter += 1
 
-    def encrypt(self, data: bytes) -> bytes:
-        result = bytearray()
-        for byte in data:
-            if not self.buffer:
-                self._refill_buffer()
-            key_byte = self.buffer[0]
-            self.buffer = self.buffer[1:]
-            result.append(byte ^ key_byte)
-        return bytes(result)
+    def process(self, data: bytes) -> bytes:
+        out = bytearray()
+        for b in data:
+            if not self.buf:
+                self._gen()
+            out.append(b ^ self.buf[0])
+            self.buf = self.buf[1:]
+        return bytes(out)
 
-    def decrypt(self, data: bytes) -> bytes:
-        return self.encrypt(data) # XOR is symmetric
 
-# --- Client Fingerprint Mitigation (Mock Implementation) ---
-# To avoid being fingerprinted (e.g., by JA3/TLS fingerprinting tools), 
-# the client must mimic a popular, allowed client (browser/OS).
-# We simulate a "ClientHello" that mimics an older Chrome/Safari version.
+def make_handshake(sni: str) -> bytes:
+    """Generate Reality handshake packet"""
+    tls = b'\x16\x03\x01\x00\xfa'
+    http = f'GET / HTTP/1.1\r\nHost: {sni}\r\nConnection: keep-alive\r\n\r\n'.encode()
+    pos = random.randint(10, len(http) - 5)
+    return tls + http[:pos] + MAGIC_HEADER + http[pos:]
 
-def generate_fingerprinted_reality_payload(sni: str) -> bytes:
-    """
-    Mocks a TLS ClientHello packet disguised for Reality SNI, 
-    but embeds the VLESS header for server recognition.
-    """
-    
-    # 1. Mock TLS Header and ClientHello structure (Simplified)
-    tls_header = b'\x16\x03\x01\x00\xfa' # Example TLS Handshake header
-    client_hello_part = f"GET / HTTP/1.1\r\nHost: {sni}\r\n\r\n".encode('utf-8')
-    
-    # 2. Embed VLESS Magic Header
-    insertion_point = random.randint(10, len(client_hello_part) - 5)
-    
-    reality_payload = (
-        tls_header + 
-        client_hello_part[:insertion_point] + 
-        VLESS_MAGIC_HEADER + 
-        client_hello_part[insertion_point:] +
-        b'padding_to_match_target_size' 
-    )
-    
-    logger.info(f"Generated Reality payload (size: {len(reality_payload)})")
-    return reality_payload
 
-async def create_vless_connection():
-    """Creates a new raw connection to the VLESS server and performs handshake."""
+async def connect():
+    """Establish encrypted connection to server"""
     reader, writer = await asyncio.open_connection(SERVER_IP, SERVER_PORT)
     
     nonce = os.urandom(16)
-    cipher = StreamCipher(VLESS_UUID, nonce)
+    cipher = Cipher(VLESS_UUID, nonce)
     
-    # 1. Send Nonce
     writer.write(nonce)
-    
-    # 2. Send Reality Handshake
-    payload = generate_fingerprinted_reality_payload(REALITY_SNI)
-    writer.write(cipher.encrypt(payload))
+    writer.write(cipher.process(make_handshake(REALITY_SNI)))
     await writer.drain()
     
+    await asyncio.sleep(0.1)
     return reader, writer, cipher
 
-async def send_vless_data(message: str, keep_alive: bool = False):
-    """Establishes connection and sends data via the mocked VLESS tunnel."""
-    
-    logger.info(f"Connecting to VLESS server at {SERVER_IP}:{SERVER_PORT}...")
+
+async def proxy_handler(local_reader, local_writer):
+    """Handle local proxy connection"""
     try:
-        reader, writer, cipher = await create_vless_connection()
+        remote_reader, remote_writer, cipher = await connect()
         
-        # Step 3: Send actual VLESS data (Encrypted)
-        # vless_data = f"VLESS_COMMAND_CONNECT_TO_DEST: {message}".encode('utf-8')
-        # encrypted_vless_data = cipher.encrypt(vless_data)
-        
-        # --- VLESS Enhancement: Traffic Splitting for DPI Evasion ---
-        CHUNK_SIZE = 50 
-        
-        # logger.info(f"Sending Encrypted VLESS data in chunks (Size: {len(encrypted_vless_data)})")
-        
-        # for i in range(0, len(encrypted_vless_data), CHUNK_SIZE):
-        #     chunk = encrypted_vless_data[i:i + CHUNK_SIZE]
-        #     writer.write(chunk)
-        #     await writer.drain()
-        #     await asyncio.sleep(random.uniform(0.01, 0.05)) 
-
-        # Step 4: Read response from the server (Encrypted)
-        # encrypted_response = await asyncio.wait_for(reader.read(4096), timeout=10.0)
-        
-        # if encrypted_response:
-        #     response = cipher.decrypt(encrypted_response)
-        #     logger.info(f"Server Response Received:\n{response.decode('utf-8', errors='ignore')}")
-        # else:
-        #     logger.warning("No response received (Server might have acted as Decoy or closed connection).")
-        
-        # Step 5: Keep connection alive if requested
-        if keep_alive:
-            logger.info("Maintaining persistent connection...")
-            
-            # Background Keep-Alive Task
-            async def send_keep_alive():
+        async def to_remote():
+            try:
                 while True:
-                    await asyncio.sleep(KEEP_ALIVE_INTERVAL)
-                    try:
-                        # logger.debug("Sending keep-alive PING...")
-                        writer.write(cipher.encrypt(b'PING'))
-                        await writer.drain()
-                    except Exception:
+                    data = await local_reader.read(4096)
+                    if not data:
                         break
-            
-            keep_alive_task = asyncio.create_task(send_keep_alive())
-            
-            # Background Read Task
-            async def read_loop():
-                try:
-                    while True:
-                        encrypted_response = await reader.read(4096)
-                        if not encrypted_response:
-                            print("\n[!] Server closed connection.")
-                            # Stop the main loop? 
-                            # We can't easily stop the input() blocking call from here.
-                            # But we can exit the process or set a flag.
-                            os._exit(0) 
-                            break
-                        
-                        response = cipher.decrypt(encrypted_response)
-                        
-                        if response == b'PONG':
-                            continue
-                        if response == b'SERVER_PING':
-                            writer.write(cipher.encrypt(b'PONG'))
-                            await writer.drain()
-                            continue
-                            
-                        print(f"\nServer: {response.decode('utf-8', errors='ignore')}")
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    print(f"\n[!] Read error: {e}")
-                    os._exit(1)
+                    remote_writer.write(cipher.process(data))
+                    await remote_writer.drain()
+            except:
+                pass
+            finally:
+                remote_writer.close()
 
-            read_task = asyncio.create_task(read_loop())
-            
-            # Proxy Simulation Task
-            proxy_task = None
-            
-            async def run_proxy_simulation():
-                print("\n[PROXY] Starting traffic simulation...")
-                urls = [
-                    "https://www.google.com/search?q=vless",
-                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-                    "https://api.twitter.com/1.1/statuses/update.json",
-                    "https://www.github.com/ospab/vpn",
-                    "https://aws.amazon.com/ec2/pricing"
-                ]
-                try:
-                    while True:
-                        url = random.choice(urls)
-                        method = "GET" if "api" not in url else "POST"
-                        req = f"{method} {url} HTTP/1.1\r\nHost: {url.split('/')[2]}\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
-                        
-                        print(f"[PROXY] Tunneling: {method} {url}")
-                        encrypted_req = cipher.encrypt(req.encode('utf-8'))
-                        writer.write(encrypted_req)
-                        await writer.drain()
-                        
-                        await asyncio.sleep(random.uniform(1.5, 4.0))
-                except asyncio.CancelledError:
-                    print("\n[PROXY] Traffic simulation stopped.")
-
-            # --- Local Proxy Listener (Real Traffic) ---
-            async def handle_local_proxy(local_reader, local_writer):
-                remote_writer = None
-                try:
-                    # 1. Connect to VPN Server for this request
-                    remote_reader, remote_writer, cipher_proxy = await create_vless_connection()
-                    
-                    # 2. Pipe Local -> Remote (Encrypted)
-                    async def pipe_local_to_remote():
-                        try:
-                            while True:
-                                data = await local_reader.read(4096)
-                                if not data: break
-                                remote_writer.write(cipher_proxy.encrypt(data))
-                                await remote_writer.drain()
-                        except Exception: pass
-                        finally: 
-                            try: remote_writer.close()
-                            except: pass
-
-                    # 3. Pipe Remote -> Local (Decrypted)
-                    async def pipe_remote_to_local():
-                        try:
-                            while True:
-                                data = await remote_reader.read(4096)
-                                if not data: break
-                                local_writer.write(cipher_proxy.decrypt(data))
-                                await local_writer.drain()
-                        except Exception: pass
-                        finally: 
-                            try: local_writer.close()
-                            except: pass
-
-                    await asyncio.gather(pipe_local_to_remote(), pipe_remote_to_local())
-                    
-                except Exception as e:
-                    print(f"Local Proxy Error: {e}")
-                    if remote_writer: remote_writer.close()
-                    local_writer.close()
-
-            local_proxy_server = None
-
-            async def start_local_proxy():
-                nonlocal local_proxy_server
-                try:
-                    # Listen on 0.0.0.0 to allow connections from WSL/LAN
-                    local_proxy_server = await asyncio.start_server(handle_local_proxy, '0.0.0.0', 10808)
-                    print(f"\n[SYSTEM PROXY] Listening on 0.0.0.0:10808")
-                except Exception as e:
-                    print(f"[!] Failed to bind port 10808: {e}")
-                    return
-
-                print(f"[DEBUG] Platform detected: {sys.platform}")
-                
-                # Check for WSL
-                is_wsl = False
-                if sys.platform == "linux":
-                    try:
-                        with open('/proc/version', 'r') as f:
-                            if "microsoft" in f.read().lower():
-                                is_wsl = True
-                    except: pass
-
-                if is_wsl:
-                    print("\n[!] WSL Detected!")
-                    print("    WSL does not share proxy settings with Windows automatically.")
-                    print("    Run this command in your WSL terminal to use the proxy:")
-                    print(f"    export http_proxy=http://127.0.0.1:10808 https_proxy=http://127.0.0.1:10808")
-                    print("    (Note: If client is running in Windows, use the Windows host IP instead of 127.0.0.1)")
-                
-                # Set Windows Proxy
-                if sys.platform == "win32":
-                    import winreg
-                    try:
-                        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_ALL_ACCESS)
-                        winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, "127.0.0.1:10808")
-                        winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
-                        winreg.CloseKey(key)
-                        print("[SYSTEM PROXY] Windows Proxy Settings ENABLED")
-                        
-                        # Hint for WSL users on Windows
-                        print("\n[INFO] To use this proxy in WSL 2:")
-                        print("    1. Get Windows IP: cat /etc/resolv.conf | grep nameserver")
-                        print("    2. export http_proxy=http://<WINDOWS_IP>:10808")
-                        
-                        os.system("inetcpl.cpl ,4") # Optional: Open settings to refresh
-                    except Exception as e:
-                        print(f"[!] Failed to set Windows Proxy: {e}")
-                
-                # Set Linux Proxy (GNOME)
-                elif sys.platform == "linux" and not is_wsl:
-                    try:
-                        # Check if gsettings is available
-                        if os.system("which gsettings > /dev/null 2>&1") == 0:
-                            print("[DEBUG] 'gsettings' found. Attempting to set GNOME proxy...")
-                            os.system("gsettings set org.gnome.system.proxy mode 'manual'")
-                            os.system("gsettings set org.gnome.system.proxy.http host '127.0.0.1'")
-                            os.system("gsettings set org.gnome.system.proxy.http port 10808")
-                            os.system("gsettings set org.gnome.system.proxy.https host '127.0.0.1'")
-                            os.system("gsettings set org.gnome.system.proxy.https port 10808")
-                            print("[SYSTEM PROXY] GNOME Proxy Settings ENABLED")
-                        else:
-                            print("[!] 'gsettings' not found. Cannot set system proxy automatically.")
-                            print("    Please manually set HTTP/HTTPS proxy to 127.0.0.1:10808")
-                    except Exception as e:
-                        print(f"[!] Failed to set Linux Proxy: {e}")
-
-            def stop_local_proxy():
-                if local_proxy_server:
-                    local_proxy_server.close()
-                
-                print(f"[DEBUG] Disabling proxy for platform: {sys.platform}")
-
-                # Disable Windows Proxy
-                if sys.platform == "win32":
-                    import winreg
-                    try:
-                        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_ALL_ACCESS)
-                        winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-                        winreg.CloseKey(key)
-                        print("[SYSTEM PROXY] Windows Proxy Settings DISABLED")
-                    except Exception:
-                        pass
-                
-                # Disable Linux Proxy (GNOME)
-                elif sys.platform == "linux":
-                    try:
-                        if os.system("which gsettings > /dev/null 2>&1") == 0:
-                            os.system("gsettings set org.gnome.system.proxy mode 'none'")
-                            print("[SYSTEM PROXY] GNOME Proxy Settings DISABLED")
-                    except Exception:
-                        pass
-
-            print("\n" + "="*60)
-            print("[~] Connection established!")
-            print("[~] Type '/help', '/proxy' (sim), '/global' (system proxy), 'exit'")
-            print("="*60)
-            
-            # Interactive Loop
-            while True:
-                try:
-                    # Use run_in_executor to avoid blocking asyncio loop with input()
-                    user_input = await asyncio.get_event_loop().run_in_executor(None, input, "> ")
-                    user_input = user_input.strip()
-                    
-                    if not user_input:
-                        continue
-                        
-                    if user_input.lower() == 'exit':
-                        stop_local_proxy()
-                        if proxy_task: proxy_task.cancel()
-                        keep_alive_task.cancel()
-                        read_task.cancel()
+        async def to_local():
+            try:
+                while True:
+                    data = await remote_reader.read(4096)
+                    if not data:
                         break
-                    
-                    if user_input.lower() == '/proxy':
-                        if proxy_task and not proxy_task.done():
-                            proxy_task.cancel()
-                            proxy_task = None
-                        else:
-                            proxy_task = asyncio.create_task(run_proxy_simulation())
-                        continue
+                    local_writer.write(cipher.process(data))
+                    await local_writer.drain()
+            except:
+                pass
+            finally:
+                local_writer.close()
 
-                    if user_input.lower() == '/global':
-                        if local_proxy_server:
-                            stop_local_proxy()
-                            local_proxy_server = None
-                        else:
-                            await start_local_proxy()
-                        continue
-
-                    # Encrypt and Send
-                    encrypted_msg = cipher.encrypt(user_input.encode('utf-8'))
-                    writer.write(encrypted_msg)
-                    await writer.drain()
-                    
-                    # Response is handled by read_loop
-                        
-                except asyncio.TimeoutError:
-                    print("[-] Timeout waiting for response")
-                except Exception as e:
-                    print(f"[-] Error: {e}")
-                    break
-
-    except ConnectionRefusedError:
-        logger.error(f"Connection refused. Is the server running on {SERVER_IP}:{SERVER_PORT}?")
+        await asyncio.gather(to_remote(), to_local())
+        
     except Exception as e:
-        logger.error(f"An error occurred: {e}")
-    finally:
-        if 'writer' in locals() and not writer.is_closing():
-            writer.close()
-            await writer.wait_closed()
-        logger.info("VLESS Client connection closed.")
+        print(f'Proxy error: {e}')
+        local_writer.close()
+
+
+def set_system_proxy(enable: bool):
+    """Set/unset system proxy"""
+    if sys.platform == 'win32':
+        import winreg
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+                0, winreg.KEY_ALL_ACCESS
+            )
+            if enable:
+                winreg.SetValueEx(key, 'ProxyServer', 0, winreg.REG_SZ, f'127.0.0.1:{PROXY_PORT}')
+                winreg.SetValueEx(key, 'ProxyEnable', 0, winreg.REG_DWORD, 1)
+                print(f'[+] System proxy enabled: 127.0.0.1:{PROXY_PORT}')
+            else:
+                winreg.SetValueEx(key, 'ProxyEnable', 0, winreg.REG_DWORD, 0)
+                print('[+] System proxy disabled')
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(f'[-] Registry error: {e}')
+            
+    elif sys.platform == 'linux' or sys.platform == 'darwin':
+        proxy_url = f'http://127.0.0.1:{PROXY_PORT}'
+        
+        if enable:
+            # Set environment variables for current process children
+            os.environ['http_proxy'] = proxy_url
+            os.environ['https_proxy'] = proxy_url
+            os.environ['HTTP_PROXY'] = proxy_url
+            os.environ['HTTPS_PROXY'] = proxy_url
+            
+            # Try GNOME gsettings
+            if os.system('which gsettings > /dev/null 2>&1') == 0:
+                os.system("gsettings set org.gnome.system.proxy mode 'manual' 2>/dev/null")
+                os.system(f"gsettings set org.gnome.system.proxy.http host '127.0.0.1' 2>/dev/null")
+                os.system(f"gsettings set org.gnome.system.proxy.http port {PROXY_PORT} 2>/dev/null")
+                os.system(f"gsettings set org.gnome.system.proxy.https host '127.0.0.1' 2>/dev/null")
+                os.system(f"gsettings set org.gnome.system.proxy.https port {PROXY_PORT} 2>/dev/null")
+                print(f'[+] GNOME proxy enabled')
+            
+            # Try KDE
+            if os.path.exists(os.path.expanduser('~/.config/kioslaverc')):
+                try:
+                    with open(os.path.expanduser('~/.config/kioslaverc'), 'a') as f:
+                        f.write(f'\n[Proxy Settings]\nProxyType=1\nhttpProxy=http://127.0.0.1 {PROXY_PORT}\nhttpsProxy=http://127.0.0.1 {PROXY_PORT}\n')
+                    print('[+] KDE proxy configured')
+                except:
+                    pass
+            
+            print(f'[+] Proxy: {proxy_url}')
+            print('[!] For terminal apps, run:')
+            print(f'    export http_proxy={proxy_url} https_proxy={proxy_url}')
+        else:
+            os.environ.pop('http_proxy', None)
+            os.environ.pop('https_proxy', None)
+            os.environ.pop('HTTP_PROXY', None)
+            os.environ.pop('HTTPS_PROXY', None)
+            
+            if os.system('which gsettings > /dev/null 2>&1') == 0:
+                os.system("gsettings set org.gnome.system.proxy mode 'none' 2>/dev/null")
+            print('[+] Proxy disabled')
 
 
 async def main():
-    configure_client()
+    global SERVER_IP, SERVER_PORT, VLESS_UUID, REALITY_SNI
     
-    print("="*60)
-    print("=== VLESS-Reality Client ===")
-    print(f"Target: {SERVER_IP}:{SERVER_PORT}")
-    print(f"SNI:    {REALITY_SNI}")
-    print("="*60)
+    # Parse CLI: client.py <uuid> [server] [port]
+    if len(sys.argv) > 1:
+        VLESS_UUID = sys.argv[1]
+    if len(sys.argv) > 2:
+        SERVER_IP = sys.argv[2]
+    if len(sys.argv) > 3:
+        SERVER_PORT = int(sys.argv[3])
     
-    await send_vless_data("Initial Handshake", keep_alive=True)
+    if not VLESS_UUID:
+        VLESS_UUID = input('UUID: ').strip()
+        if not VLESS_UUID:
+            print('UUID required')
+            return
 
-if __name__ == "__main__":
+    print(f'''
+╔══════════════════════════════════════════╗
+║         VLESS-Reality Client             ║
+╠══════════════════════════════════════════╣
+║  Server: {SERVER_IP}:{SERVER_PORT:<24}║
+║  Proxy:  127.0.0.1:{PROXY_PORT:<23}║
+╚══════════════════════════════════════════╝
+''')
+
+    # Test connection
+    try:
+        print('[*] Testing connection...')
+        r, w, c = await asyncio.wait_for(connect(), timeout=5)
+        w.write(c.process(b'PING'))
+        await w.drain()
+        resp = await asyncio.wait_for(r.read(64), timeout=5)
+        if c.process(resp) == b'PONG':
+            print('[+] Server authenticated')
+        w.close()
+    except Exception as e:
+        print(f'[-] Connection failed: {e}')
+        return
+
+    # Start proxy
+    try:
+        server = await asyncio.start_server(proxy_handler, '0.0.0.0', PROXY_PORT)
+        print(f'[+] HTTP Proxy listening on 0.0.0.0:{PROXY_PORT}')
+    except OSError as e:
+        print(f'[-] Port {PROXY_PORT} busy: {e}')
+        return
+
+    set_system_proxy(True)
+    print('[*] Press Ctrl+C to stop\n')
+
+    try:
+        await server.serve_forever()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        set_system_proxy(False)
+        server.close()
+
+
+if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[!] Client stopped manually.")
+        print('\n[!] Stopped')
+        set_system_proxy(False)
