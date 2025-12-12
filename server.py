@@ -37,27 +37,35 @@ class Cipher:
         self.counter += 1
         return block
 
+    def _xor_bytes(self, a, b):
+        return (int.from_bytes(a, 'big') ^ int.from_bytes(b, 'big')).to_bytes(len(a), 'big')
+
     def process(self, data):
-        result = bytearray(len(data))
+        if not data:
+            return b''
+        
+        result = []
         pos = 0
+        data_len = len(data)
         
         if self.buf:
-            use = min(len(self.buf), len(data))
-            for i in range(use):
-                result[i] = data[i] ^ self.buf[i]
+            use = min(len(self.buf), data_len)
+            result.append(self._xor_bytes(data[:use], self.buf[:use]))
             self.buf = self.buf[use:]
             pos = use
         
-        while pos < len(data):
+        while pos < data_len:
             block = self._gen_block()
-            use = min(32, len(data) - pos)
-            for i in range(use):
-                result[pos + i] = data[pos + i] ^ block[i]
-            if use < 32:
-                self.buf = block[use:]
-            pos += use
+            remaining = data_len - pos
+            if remaining >= 32:
+                result.append(self._xor_bytes(data[pos:pos+32], block))
+                pos += 32
+            else:
+                result.append(self._xor_bytes(data[pos:], block[:remaining]))
+                self.buf = block[remaining:]
+                pos = data_len
         
-        return bytes(result)
+        return b''.join(result)
 
 
 def check_ban(ip):
@@ -159,6 +167,10 @@ class MultiplexServer:
             remote_r, remote_w = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=10
             )
+            
+            rsock = remote_w.get_extra_info('socket')
+            if rsock:
+                rsock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
             stream_info = StreamInfo(remote_w)
             self.streams[stream_id] = stream_info
@@ -172,7 +184,7 @@ class MultiplexServer:
             async def from_remote():
                 try:
                     while True:
-                        data = await remote_r.read(32768)
+                        data = await remote_r.read(65536)
                         if not data:
                             break
                         await self.send_frame(stream_id, data)
@@ -196,7 +208,7 @@ class MultiplexServer:
         buf = b''
         try:
             while True:
-                chunk = await asyncio.wait_for(self.reader.read(65536), timeout=TIMEOUT)
+                chunk = await asyncio.wait_for(self.reader.read(131072), timeout=TIMEOUT)
                 if not chunk:
                     break
                 
@@ -248,6 +260,12 @@ async def handle(reader, writer):
     if not check_ban(ip):
         writer.close()
         return
+
+    sock = writer.get_extra_info('socket')
+    if sock:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)
 
     try:
         nonce = await asyncio.wait_for(reader.read(16), timeout=10)

@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import os
 import random
+import socket
 import struct
 import sys
 import threading
@@ -27,27 +28,35 @@ class Cipher:
         self.counter += 1
         return block
 
+    def _xor_bytes(self, a, b):
+        return (int.from_bytes(a, 'big') ^ int.from_bytes(b, 'big')).to_bytes(len(a), 'big')
+
     def process(self, data):
-        result = bytearray(len(data))
+        if not data:
+            return b''
+        
+        result = []
         pos = 0
+        data_len = len(data)
         
         if self.buf:
-            use = min(len(self.buf), len(data))
-            for i in range(use):
-                result[i] = data[i] ^ self.buf[i]
+            use = min(len(self.buf), data_len)
+            result.append(self._xor_bytes(data[:use], self.buf[:use]))
             self.buf = self.buf[use:]
             pos = use
         
-        while pos < len(data):
+        while pos < data_len:
             block = self._gen_block()
-            use = min(32, len(data) - pos)
-            for i in range(use):
-                result[pos + i] = data[pos + i] ^ block[i]
-            if use < 32:
-                self.buf = block[use:]
-            pos += use
+            remaining = data_len - pos
+            if remaining >= 32:
+                result.append(self._xor_bytes(data[pos:pos+32], block))
+                pos += 32
+            else:
+                result.append(self._xor_bytes(data[pos:], block[:remaining]))
+                self.buf = block[remaining:]
+                pos = data_len
         
-        return bytes(result)
+        return b''.join(result)
 
 
 def make_handshake(sni):
@@ -83,6 +92,12 @@ class MultiplexClient:
                     asyncio.open_connection(self.server_ip, self.server_port), timeout=10
                 )
                 
+                sock = self.writer.get_extra_info('socket')
+                if sock:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)
+                
                 nonce = os.urandom(16)
                 self.cipher = Cipher(self.uuid, nonce)
                 
@@ -100,7 +115,7 @@ class MultiplexClient:
         buf = b''
         try:
             while self.connected:
-                chunk = await self.reader.read(65536)
+                chunk = await self.reader.read(131072)
                 if not chunk:
                     break
                 
@@ -217,7 +232,7 @@ class VPNClient:
             async def to_remote():
                 try:
                     while True:
-                        data = await local_reader.read(32768)
+                        data = await local_reader.read(65536)
                         if not data:
                             break
                         await self.mux.send_frame(stream_id, data)
@@ -234,9 +249,13 @@ class VPNClient:
                         if data is None:
                             break
                         local_writer.write(data)
-                        await local_writer.drain()
                 except Exception:
                     pass
+                finally:
+                    try:
+                        await local_writer.drain()
+                    except Exception:
+                        pass
 
             await asyncio.gather(to_remote(), to_local())
             
@@ -408,7 +427,7 @@ def run_tui():
         curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)
         curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)
         
-        title = "VLESS-Reality VPN Setup"
+        title = "ospab.vpn setup"
         stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
         stdscr.addstr(1, max(0, (w - len(title)) // 2), title)
         stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
@@ -419,11 +438,11 @@ def run_tui():
         stdscr.addstr(3, 2, f"{progress} [{bar}]")
         stdscr.attroff(curses.color_pair(2))
         
-        draw_box(stdscr, 5, 1, 8, min(w - 2, 60), "Configuration")
+        draw_box(stdscr, 5, 1, 8, min(w - 2, 52), "configuration")
         
         if step == 0:
-            stdscr.addstr(7, 4, "Enter your VPN server IP address:")
-            result = get_filtered_input(stdscr, 9, 4, "IP: ", validate_ip)
+            stdscr.addstr(7, 4, "enter your vpn server ip address:")
+            result = get_filtered_input(stdscr, 9, 4, "ip: ", validate_ip)
             if result:
                 parts = result.split('.')
                 if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
@@ -432,8 +451,8 @@ def run_tui():
             return False
             
         elif step == 1:
-            stdscr.addstr(7, 4, "Enter server port:")
-            result = get_filtered_input(stdscr, 9, 4, "Port: ", validate_port, "4433")
+            stdscr.addstr(7, 4, "enter server port:")
+            result = get_filtered_input(stdscr, 9, 4, "port: ", validate_port, "4433")
             try:
                 port = int(result)
                 if 1 <= port <= 65535:
@@ -444,16 +463,16 @@ def run_tui():
             return False
             
         elif step == 2:
-            stdscr.addstr(7, 4, "Enter your UUID (secret key):")
-            result = get_filtered_input(stdscr, 9, 4, "UUID: ", validate_uuid)
+            stdscr.addstr(7, 4, "enter your uuid (secret key):")
+            result = get_filtered_input(stdscr, 9, 4, "uuid: ", validate_uuid)
             if result:
                 client.uuid = result
                 return True
             return False
             
         elif step == 3:
-            stdscr.addstr(7, 4, "Enter SNI (camouflage domain):")
-            result = get_filtered_input(stdscr, 9, 4, "SNI: ", validate_sni, "www.microsoft.com")
+            stdscr.addstr(7, 4, "enter sni (camouflage domain):")
+            result = get_filtered_input(stdscr, 9, 4, "sni: ", validate_sni, "www.microsoft.com")
             client.sni = result if result else "www.microsoft.com"
             return True
         
@@ -462,7 +481,7 @@ def run_tui():
     def run_wizard(stdscr):
         for step in range(4):
             while not wizard_step(stdscr, step):
-                stdscr.addstr(12, 4, "Invalid input! Try again...")
+                stdscr.addstr(12, 4, "invalid input! try again...")
                 stdscr.refresh()
                 stdscr.getch()
         return True
@@ -483,21 +502,37 @@ def run_tui():
         if not run_wizard(stdscr):
             return
         
-        log("Configuration complete!")
+        log("checking connection...")
+        stdscr.clear()
+        stdscr.addstr(5, 2, "verifying server connection...")
+        stdscr.refresh()
+        
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(client.test_connection())
+        loop.close()
+        
+        if result:
+            log("server reachable!")
+            status = "ready"
+        else:
+            log("warning: server unreachable")
+            status = "offline"
         
         while True:
             stdscr.clear()
             h, w = stdscr.getmaxyx()
             
             if h < 20 or w < 50:
-                stdscr.addstr(0, 0, "Terminal too small!")
-                stdscr.addstr(1, 0, f"Need: 50x20, have: {w}x{h}")
-                stdscr.addstr(2, 0, "Resize and press any key...")
+                stdscr.addstr(0, 0, "terminal too small!")
+                stdscr.addstr(1, 0, f"need: 50x20, have: {w}x{h}")
+                stdscr.addstr(2, 0, "resize and press any key...")
                 stdscr.refresh()
                 stdscr.getch()
                 continue
             
             try:
+                box_width = min(w - 2, 52)
+                
                 ascii_art = [
                     "██╗   ██╗██╗     ███████╗███████╗███████╗",
                     "██║   ██║██║     ██╔════╝██╔════╝██╔════╝",
@@ -514,45 +549,46 @@ def run_tui():
                         stdscr.addstr(1 + i, x, line)
                 stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
                 
-                subtitle = "Reality VPN Client v2.0"
+                subtitle = "ospab.vpn v2.0"
                 stdscr.addstr(8, max(0, (w - len(subtitle)) // 2), subtitle)
                 
-                draw_box(stdscr, 10, 1, 6, min(w - 2, 50), "Status")
+                draw_box(stdscr, 10, 1, 6, box_width, "status")
                 
                 if client.connected:
                     stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
-                    stdscr.addstr(12, 4, " ● CONNECTED ")
+                    stdscr.addstr(12, 4, "● connected")
                     stdscr.attroff(curses.color_pair(5) | curses.A_BOLD)
                 else:
                     stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
-                    stdscr.addstr(12, 4, " ○ DISCONNECTED ")
+                    stdscr.addstr(12, 4, "○ disconnected")
                     stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
                 
-                stdscr.addstr(14, 4, f"Server: {client.server_ip}:{client.server_port}")
+                stdscr.addstr(14, 4, f"server: {client.server_ip}:{client.server_port}")
                 
-                draw_box(stdscr, 17, 1, 5, min(w - 2, 50), "Connection Info")
-                stdscr.addstr(19, 4, f"Proxy: 127.0.0.1:{PROXY_PORT}")
+                draw_box(stdscr, 17, 1, 5, box_width, "connection info")
+                stdscr.addstr(19, 4, f"proxy: 127.0.0.1:{PROXY_PORT}")
                 uuid_short = client.uuid[:16] + "..." if len(client.uuid) > 16 else client.uuid
-                stdscr.addstr(20, 4, f"UUID: {uuid_short}")
+                stdscr.addstr(20, 4, f"uuid: {uuid_short}")
                 
-                draw_box(stdscr, 23, 1, 4, min(w - 2, 50), "Menu")
+                draw_box(stdscr, 23, 1, 5, box_width, "menu")
                 
                 if not client.connected:
                     stdscr.attron(curses.color_pair(2))
-                    stdscr.addstr(25, 4, "[C] Connect")
+                    stdscr.addstr(25, 4, "[c] connect")
                     stdscr.attroff(curses.color_pair(2))
                 else:
                     stdscr.attron(curses.color_pair(3))
-                    stdscr.addstr(25, 4, "[D] Disconnect")
+                    stdscr.addstr(25, 4, "[d] disconnect")
                     stdscr.attroff(curses.color_pair(3))
                 
-                stdscr.addstr(25, 20, "[T] Test   [R] Reconfigure   [Q] Quit")
+                menu_rest = "[r] reconfigure   [q] quit"
+                stdscr.addstr(26, 4, menu_rest[:box_width - 6])
                 
-                if log_messages and h > 32:
-                    draw_box(stdscr, 28, 1, min(6, len(log_messages) + 2), min(w - 2, 50), "Log")
+                if log_messages and h > 34:
+                    draw_box(stdscr, 29, 1, min(6, len(log_messages) + 2), box_width, "log")
                     for i, msg in enumerate(log_messages[-4:]):
-                        if 29 + i < h - 1:
-                            stdscr.addstr(29 + i, 4, msg[:w - 8])
+                        if 30 + i < h - 1:
+                            stdscr.addstr(30 + i, 4, msg[:box_width - 6])
             
             except curses.error:
                 pass
@@ -562,7 +598,7 @@ def run_tui():
             
             if key == ord('c') or key == ord('C'):
                 if not client.connected:
-                    log("Connecting...")
+                    log("connecting...")
                     stdscr.refresh()
                     
                     def run_vpn():
@@ -571,12 +607,12 @@ def run_tui():
                             client.loop = asyncio.new_event_loop()
                             asyncio.set_event_loop(client.loop)
                             set_system_proxy(True)
-                            status = "Connected"
-                            log("VPN tunnel established!")
+                            status = "connected"
+                            log("vpn tunnel established!")
                             client.loop.run_until_complete(client.start_proxy())
                         except Exception as err:
-                            status = "Error"
-                            log(f"Error: {str(err)[:30]}")
+                            status = "error"
+                            log(f"error: {str(err)[:30]}")
                             set_system_proxy(False)
                     
                     thread = threading.Thread(target=run_vpn, daemon=True)
@@ -586,28 +622,15 @@ def run_tui():
                 if client.connected:
                     client.stop_proxy()
                     set_system_proxy(False)
-                    status = "Disconnected"
-                    log("Disconnected")
-                    
-            elif key == ord('t') or key == ord('T'):
-                log("Testing connection...")
-                stdscr.refresh()
-                
-                loop = asyncio.new_event_loop()
-                result = loop.run_until_complete(client.test_connection())
-                loop.close()
-                
-                if result:
-                    log("Connection test: SUCCESS")
-                else:
-                    log("Connection test: FAILED")
+                    status = "disconnected"
+                    log("disconnected")
                     
             elif key == ord('r') or key == ord('R'):
                 if client.connected:
                     client.stop_proxy()
                     set_system_proxy(False)
                 run_wizard(stdscr)
-                log("Configuration updated")
+                log("configuration updated")
                     
             elif key == ord('q') or key == ord('Q'):
                 if client.connected:
@@ -639,11 +662,11 @@ def run_gui():
         header.pack(fill='x')
         header.pack_propagate(False)
         
-        title_label = tk.Label(header, text="🔐 VLESS-Reality VPN", 
+        title_label = tk.Label(header, text="🔐 ospab.vpn", 
                                font=('Segoe UI', 18, 'bold'), fg='white', bg='#2d3436')
         title_label.pack(pady=10)
         
-        step_label = tk.Label(header, text="Step 1/4: Server IP", 
+        step_label = tk.Label(header, text="step 1/4: server ip", 
                               font=('Segoe UI', 10), fg='#b2bec3', bg='#2d3436')
         step_label.pack()
         
@@ -656,7 +679,7 @@ def run_gui():
         content = tk.Frame(wizard, padx=40, pady=30)
         content.pack(fill='both', expand=True)
         
-        prompt_label = tk.Label(content, text="Enter your VPN server IP address:", 
+        prompt_label = tk.Label(content, text="enter your vpn server ip address:", 
                                 font=('Segoe UI', 12))
         prompt_label.pack(anchor='w', pady=(0, 10))
         
@@ -704,13 +727,13 @@ def run_gui():
         btn_frame.pack(side='bottom', pady=20)
         
         steps_config = [
-            {"title": "Step 1/4: Server IP", "prompt": "Enter your VPN server IP address:",
+            {"title": "step 1/4: server ip", "prompt": "enter your vpn server ip address:",
              "filter": "ip", "default": ""},
-            {"title": "Step 2/4: Port", "prompt": "Enter server port:",
+            {"title": "step 2/4: port", "prompt": "enter server port:",
              "filter": "port", "default": "4433"},
-            {"title": "Step 3/4: UUID", "prompt": "Enter your UUID (secret key):",
+            {"title": "step 3/4: uuid", "prompt": "enter your uuid (secret key):",
              "filter": "uuid", "default": ""},
-            {"title": "Step 4/4: SNI", "prompt": "Enter SNI (camouflage domain):",
+            {"title": "step 4/4: sni", "prompt": "enter sni (camouflage domain):",
              "filter": "sni", "default": "www.microsoft.com"},
         ]
         
@@ -731,33 +754,33 @@ def run_gui():
                 back_btn.config(state='disabled')
                 
             if step[0] == 3:
-                next_btn.config(text="Finish ✓")
+                next_btn.config(text="finish ✓")
             else:
-                next_btn.config(text="Next →")
+                next_btn.config(text="next →")
         
         def next_step():
             val = entry_var.get().strip()
             
             if step[0] == 0:
                 if not val:
-                    error_label.config(text="Server IP is required")
+                    error_label.config(text="server ip is required")
                     return
                 parts = val.split('.')
                 if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-                    error_label.config(text="Invalid IP format")
+                    error_label.config(text="invalid ip format")
                     return
                 client.server_ip = val
                 
             elif step[0] == 1:
                 port = int(val) if val else 4433
                 if port < 1 or port > 65535:
-                    error_label.config(text="Port must be 1-65535")
+                    error_label.config(text="port must be 1-65535")
                     return
                 client.server_port = port
                 
             elif step[0] == 2:
                 if not val:
-                    error_label.config(text="UUID is required")
+                    error_label.config(text="uuid is required")
                     return
                 client.uuid = val
                 
@@ -777,10 +800,10 @@ def run_gui():
                 step[0] -= 1
                 update_step()
         
-        back_btn = ttk.Button(btn_frame, text="← Back", command=prev_step, state='disabled')
+        back_btn = ttk.Button(btn_frame, text="← back", command=prev_step, state='disabled')
         back_btn.pack(side='left', padx=5)
         
-        next_btn = ttk.Button(btn_frame, text="Next →", command=next_step)
+        next_btn = ttk.Button(btn_frame, text="next →", command=next_step)
         next_btn.pack(side='left', padx=5)
         
         wizard.bind('<Return>', lambda e: next_step())
@@ -789,7 +812,7 @@ def run_gui():
         return wizard_complete[0]
     
     root = tk.Tk()
-    root.title("VLESS-Reality VPN")
+    root.title("ospab.vpn")
     root.geometry("480x520")
     root.resizable(False, False)
     root.configure(bg='#f5f6fa')
@@ -804,35 +827,35 @@ def run_gui():
     header_frame.pack(fill='x')
     header_frame.pack_propagate(False)
     
-    logo_text = tk.Label(header_frame, text="🔐 VLESS-Reality", 
+    logo_text = tk.Label(header_frame, text="🔐 ospab.vpn", 
                          font=('Segoe UI', 20, 'bold'), fg='white', bg='#2d3436')
     logo_text.pack(pady=15)
     
-    subtitle = tk.Label(header_frame, text="Secure VPN Client v2.0",
+    subtitle = tk.Label(header_frame, text="secure vpn client v2.0",
                         font=('Segoe UI', 10), fg='#b2bec3', bg='#2d3436')
     subtitle.pack()
     
     status_frame = tk.Frame(root, bg='#f5f6fa', pady=15)
     status_frame.pack(fill='x')
     
-    status_var = tk.StringVar(value="● Disconnected")
+    status_var = tk.StringVar(value="● disconnected")
     status_label = tk.Label(status_frame, textvariable=status_var, 
                             font=('Segoe UI', 14, 'bold'), fg='#e74c3c', bg='#f5f6fa')
     status_label.pack()
     
-    info_frame = tk.LabelFrame(root, text="Connection Details", 
+    info_frame = tk.LabelFrame(root, text="connection details", 
                                font=('Segoe UI', 10), bg='#f5f6fa', padx=15, pady=10)
     info_frame.pack(fill='x', padx=20, pady=10)
     
-    server_var = tk.StringVar(value="Not configured")
-    tk.Label(info_frame, text="Server:", font=('Segoe UI', 10), bg='#f5f6fa').grid(row=0, column=0, sticky='w')
+    server_var = tk.StringVar(value="not configured")
+    tk.Label(info_frame, text="server:", font=('Segoe UI', 10), bg='#f5f6fa').grid(row=0, column=0, sticky='w')
     tk.Label(info_frame, textvariable=server_var, font=('Segoe UI', 10, 'bold'), bg='#f5f6fa').grid(row=0, column=1, sticky='w', padx=10)
     
-    proxy_label = tk.Label(info_frame, text="Local Proxy:", font=('Segoe UI', 10), bg='#f5f6fa')
+    proxy_label = tk.Label(info_frame, text="local proxy:", font=('Segoe UI', 10), bg='#f5f6fa')
     proxy_label.grid(row=1, column=0, sticky='w')
     tk.Label(info_frame, text=f"127.0.0.1:{PROXY_PORT}", font=('Segoe UI', 10, 'bold'), bg='#f5f6fa').grid(row=1, column=1, sticky='w', padx=10)
     
-    tk.Label(info_frame, text="UUID:", font=('Segoe UI', 10), bg='#f5f6fa').grid(row=2, column=0, sticky='w')
+    tk.Label(info_frame, text="uuid:", font=('Segoe UI', 10), bg='#f5f6fa').grid(row=2, column=0, sticky='w')
     uuid_var = tk.StringVar(value="---")
     tk.Label(info_frame, textvariable=uuid_var, font=('Segoe UI', 10), bg='#f5f6fa').grid(row=2, column=1, sticky='w', padx=10)
     
@@ -848,9 +871,9 @@ def run_gui():
         if client.running:
             client.stop_proxy()
             set_system_proxy(False)
-            status_var.set("● Disconnected")
+            status_var.set("● disconnected")
             status_label.config(fg='#e74c3c')
-            connect_btn.config(text="🚀 Connect")
+            connect_btn.config(text="🚀 connect")
             return
         
         if not client.server_ip or not client.uuid:
@@ -858,7 +881,7 @@ def run_gui():
                 return
             update_info()
         
-        status_var.set("● Connecting...")
+        status_var.set("● connecting...")
         status_label.config(fg='#f39c12')
         root.update()
         
@@ -868,18 +891,18 @@ def run_gui():
                 asyncio.set_event_loop(client.loop)
                 
                 if not client.loop.run_until_complete(client.test_connection()):
-                    root.after(0, lambda: status_var.set("● Connection Failed"))
+                    root.after(0, lambda: status_var.set("● connection failed"))
                     root.after(0, lambda: status_label.config(fg='#e74c3c'))
-                    root.after(0, lambda: messagebox.showerror("Error", "Could not connect to server"))
+                    root.after(0, lambda: messagebox.showerror("error", "could not connect to server"))
                     return
                 
                 set_system_proxy(True)
-                root.after(0, lambda: status_var.set("● Connected"))
+                root.after(0, lambda: status_var.set("● connected"))
                 root.after(0, lambda: status_label.config(fg='#27ae60'))
-                root.after(0, lambda: connect_btn.config(text="🛑 Disconnect"))
+                root.after(0, lambda: connect_btn.config(text="🛑 disconnect"))
                 client.loop.run_until_complete(client.start_proxy())
             except Exception as err:
-                root.after(0, lambda: status_var.set("● Error"))
+                root.after(0, lambda: status_var.set("● error"))
                 root.after(0, lambda: status_label.config(fg='#e74c3c'))
                 set_system_proxy(False)
         
@@ -888,43 +911,40 @@ def run_gui():
     
     def on_configure():
         if client.running:
-            messagebox.showwarning("Warning", "Disconnect first before reconfiguring")
+            messagebox.showwarning("warning", "disconnect first before reconfiguring")
             return
         if show_wizard():
             update_info()
+            do_auto_check()
     
-    def on_test():
-        if not client.server_ip or not client.uuid:
-            messagebox.showwarning("Warning", "Configure connection first")
-            return
-        
-        status_var.set("● Testing...")
+    def do_auto_check():
+        status_var.set("● checking...")
         status_label.config(fg='#f39c12')
         root.update()
         
-        loop = asyncio.new_event_loop()
-        result = loop.run_until_complete(client.test_connection())
-        loop.close()
+        def check_thread():
+            loop = asyncio.new_event_loop()
+            result = loop.run_until_complete(client.test_connection())
+            loop.close()
+            
+            if result:
+                root.after(0, lambda: status_var.set("● ready"))
+                root.after(0, lambda: status_label.config(fg='#27ae60'))
+            else:
+                root.after(0, lambda: status_var.set("● offline"))
+                root.after(0, lambda: status_label.config(fg='#e74c3c'))
         
-        if result:
-            status_var.set("● Test Passed")
-            status_label.config(fg='#27ae60')
-            messagebox.showinfo("Success", "Connection test successful!")
-        else:
-            status_var.set("● Test Failed")
-            status_label.config(fg='#e74c3c')
-            messagebox.showerror("Error", "Connection test failed")
+        threading.Thread(target=check_thread, daemon=True).start()
     
-    connect_btn = ttk.Button(btn_frame, text="🚀 Connect", command=on_connect, width=20, style='Accent.TButton')
+    connect_btn = ttk.Button(btn_frame, text="🚀 connect", command=on_connect, width=20, style='Accent.TButton')
     connect_btn.pack(pady=5)
     
     sub_btn_frame = tk.Frame(btn_frame, bg='#f5f6fa')
     sub_btn_frame.pack(pady=5)
     
-    ttk.Button(sub_btn_frame, text="⚙️ Configure", command=on_configure, width=12).pack(side='left', padx=5)
-    ttk.Button(sub_btn_frame, text="🔍 Test", command=on_test, width=12).pack(side='left', padx=5)
+    ttk.Button(sub_btn_frame, text="⚙️ configure", command=on_configure, width=12).pack(side='left', padx=5)
     
-    footer = tk.Label(root, text="Press Connect to setup or use existing configuration",
+    footer = tk.Label(root, text="press connect to setup or use existing configuration",
                       font=('Segoe UI', 9), fg='gray', bg='#f5f6fa')
     footer.pack(side='bottom', pady=10)
     

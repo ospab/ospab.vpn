@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import os
 import random
+import socket
 import struct
 import sys
 
@@ -26,27 +27,35 @@ class Cipher:
         self.counter += 1
         return block
 
+    def _xor_bytes(self, a, b):
+        return (int.from_bytes(a, 'big') ^ int.from_bytes(b, 'big')).to_bytes(len(a), 'big')
+
     def process(self, data):
-        result = bytearray(len(data))
+        if not data:
+            return b''
+        
+        result = []
         pos = 0
+        data_len = len(data)
         
         if self.buf:
-            use = min(len(self.buf), len(data))
-            for i in range(use):
-                result[i] = data[i] ^ self.buf[i]
+            use = min(len(self.buf), data_len)
+            result.append(self._xor_bytes(data[:use], self.buf[:use]))
             self.buf = self.buf[use:]
             pos = use
         
-        while pos < len(data):
+        while pos < data_len:
             block = self._gen_block()
-            use = min(32, len(data) - pos)
-            for i in range(use):
-                result[pos + i] = data[pos + i] ^ block[i]
-            if use < 32:
-                self.buf = block[use:]
-            pos += use
+            remaining = data_len - pos
+            if remaining >= 32:
+                result.append(self._xor_bytes(data[pos:pos+32], block))
+                pos += 32
+            else:
+                result.append(self._xor_bytes(data[pos:], block[:remaining]))
+                self.buf = block[remaining:]
+                pos = data_len
         
-        return bytes(result)
+        return b''.join(result)
 
 
 def make_handshake(sni):
@@ -78,6 +87,12 @@ class MultiplexClient:
                     asyncio.open_connection(server_ip, server_port), timeout=10
                 )
                 
+                sock = self.writer.get_extra_info('socket')
+                if sock:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)
+                
                 nonce = os.urandom(16)
                 self.cipher = Cipher(uuid_key, nonce)
                 
@@ -95,7 +110,7 @@ class MultiplexClient:
         buf = b''
         try:
             while self.connected:
-                chunk = await self.reader.read(65536)
+                chunk = await self.reader.read(131072)
                 if not chunk:
                     break
                 
@@ -172,7 +187,7 @@ async def proxy_handler(local_reader, local_writer):
         async def to_remote():
             try:
                 while True:
-                    data = await local_reader.read(32768)
+                    data = await local_reader.read(65536)
                     if not data:
                         break
                     await mux.send_frame(stream_id, data)
@@ -189,9 +204,13 @@ async def proxy_handler(local_reader, local_writer):
                     if data is None:
                         break
                     local_writer.write(data)
-                    await local_writer.drain()
             except Exception:
                 pass
+            finally:
+                try:
+                    await local_writer.drain()
+                except Exception:
+                    pass
 
         await asyncio.gather(to_remote(), to_local())
         
