@@ -236,30 +236,38 @@ def build_server_hello(session_id):
 
 
 async def handle(reader, writer):
+    addr = writer.get_extra_info('peername')
+    print(f'[LOG] Новое соединение от {addr}')
     sock = writer.get_extra_info('socket')
     if sock:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     try:
         hello = await asyncio.wait_for(reader.read(4096), 10)
+        print(f'[LOG] Получен ClientHello от {addr}: {len(hello)} байт')
         if len(hello) < 76:
+            print(f'[LOG] ClientHello слишком короткий от {addr}')
             return writer.close()
 
         sni = extract_sni(hello)
+        print(f'[LOG] SNI от {addr}: {sni}')
 
         if verify_client_hello(hello, UUID):
+            print(f'[LOG] Reality аутентификация успешна для {addr}')
             nonce = hello[39:55]
             cipher = Cipher(UUID, nonce)
             writer.write(build_server_hello(nonce + hello[55:71]))
             await writer.drain()
             await Multiplexer(reader, writer, cipher).run()
         else:
+            print(f'[LOG] Reality аутентификация не пройдена для {addr}, проксирую на {sni}')
             await proxy_to_real(reader, writer, hello, sni)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f'[LOG] Ошибка в handle для {addr}: {e}')
     finally:
         if not writer.is_closing():
             writer.close()
+        print(f'[LOG] Соединение с {addr} закрыто')
 
 
 def get_local_ip():

@@ -103,24 +103,30 @@ class Multiplexer:
             if self.connected:
                 return True
             try:
+                print(f'[LOG] Подключение к {server}:{port}...')
                 self.reader, self.writer = await asyncio.wait_for(
                     asyncio.open_connection(server, port), 10)
                 self.writer.get_extra_info('socket').setsockopt(
                     socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 
                 hello, nonce = build_client_hello(sni, uuid_key)
+                print(f'[LOG] Отправка ClientHello: {len(hello)} байт')
                 self.writer.write(hello)
                 await self.writer.drain()
                 
                 resp = await asyncio.wait_for(self.reader.read(1024), 10)
+                print(f'[LOG] Получен ответ: {len(resp)} байт, начинается с {resp[:10].hex() if resp else "пусто"}')
                 if len(resp) < 10 or resp[0] != 0x16:
+                    print('[LOG] Ответ не является TLS handshake')
                     return False
                 
                 self.cipher = Cipher(uuid_key, nonce)
                 self.connected = True
+                print(f'[LOG] Успешное подключение к Reality серверу {server}:{port}')
                 asyncio.create_task(self._reader_loop())
                 return True
-            except Exception:
+            except Exception as e:
+                print(f'[LOG] Ошибка подключения: {e}')
                 return False
 
     async def _reader_loop(self):
@@ -255,6 +261,7 @@ def load_config(path='config.yml'):
     """Load config from YAML file"""
     global SERVER, PORT, UUID, SNI, PROXY_PORT
     try:
+        print(f'[LOG] Загрузка конфига из {path}...')
         with open(path, 'r', encoding='utf-8') as f:
             current_section = None
             config = {}
@@ -273,19 +280,22 @@ def load_config(path='config.yml'):
                         config[current_section][key] = value
                     else:
                         config[key] = value
-            
             server = config.get('server', {})
+            proxy = config.get('proxy', {})
+            print(f'[LOG] server: {server}')
+            print(f'[LOG] proxy: {proxy}')
             SERVER = server.get('ip', SERVER)
             PORT = int(server.get('port', PORT))
             UUID = server.get('uuid', UUID)
             SNI = server.get('sni', SNI)
-            
-            proxy = config.get('proxy', {})
             PROXY_PORT = int(proxy.get('port', PROXY_PORT))
+            print(f'[LOG] Конфиг загружен: SERVER={SERVER}, PORT={PORT}, UUID={UUID}, SNI={SNI}, PROXY_PORT={PROXY_PORT}')
             return True
     except FileNotFoundError:
+        print(f'[LOG] config.yml не найден')
         return False
-    except Exception:
+    except Exception as e:
+        print(f'[LOG] Ошибка при загрузке config.yml: {e}')
         return False
 
 
@@ -295,7 +305,7 @@ def setup():
     # Try loading config.yml first
     if os.path.exists('config.yml') and load_config('config.yml'):
         if SERVER and UUID and UUID != 'your-uuid-here':
-            print('[+] Loaded config from config.yml')
+            print('[LOG] Конфиг успешно загружен из config.yml')
             return True
     
     if len(sys.argv) == 5:
@@ -329,34 +339,40 @@ def setup():
 
 
 async def test_connection():
-    print('\n[*] Testing Reality connection...')
+    print(f'\n[LOG] Проверка соединения Reality: {SERVER}:{PORT}, UUID={UUID}, SNI={SNI}')
     try:
         r, w = await asyncio.wait_for(asyncio.open_connection(SERVER, PORT), 5)
-        hello, _ = build_client_hello(SNI, UUID)
+        hello, nonce = build_client_hello(SNI, UUID)
+        print(f'[LOG] Отправка ClientHello: {len(hello)} байт')
         w.write(hello)
         await w.drain()
         resp = await asyncio.wait_for(r.read(1024), 5)
         w.close()
+        print(f'[LOG] Получен ответ: {len(resp)} байт, начинается с {resp[:10].hex() if resp else "пусто"}')
         if len(resp) >= 10 and resp[0] == 0x16 and resp[5] == 0x02:
-            print('[+] Reality handshake successful!')
+            print('[LOG] Reality handshake успешен!')
             return True
-        print('[-] Invalid server response')
+        print('[LOG] Некорректный ответ сервера')
         return False
     except Exception as e:
-        print(f'[-] Connection failed: {e}')
+        print(f'[LOG] Ошибка соединения: {e}')
         return False
 
 
 async def main():
+    print('[LOG] Запуск клиента...')
     if not setup():
+        print('[LOG] setup() вернул False, выход')
         return
-    
+    print('[LOG] setup() завершён')
     if not await test_connection():
+        print('[LOG] test_connection() неудачен, выход')
         return
-    
+    print('[LOG] test_connection() успешен')
     if not await mux.connect(SERVER, PORT, UUID, SNI):
+        print('[LOG] mux.connect() неудачен, выход')
         return print('[-] Failed to establish tunnel')
-    
+    print('[LOG] mux.connect() успешен')
     print(f'''
 ╔══════════════════════════════════════════════════════╗
 ║            ospab.vpn Reality Client                  ║
@@ -372,18 +388,18 @@ async def main():
 ║  • DPI-resistant                                     ║
 ╚══════════════════════════════════════════════════════╝
 ''')
-    
     set_proxy(True)
-    print(f'[+] HTTP Proxy listening on 0.0.0.0:{PROXY_PORT}')
+    print(f'[LOG] HTTP Proxy слушает на 0.0.0.0:{PROXY_PORT}')
     print('[*] Press Ctrl+C to disconnect\n')
-    
     try:
+        print('[LOG] Запуск asyncio.start_server...')
         server = await asyncio.start_server(proxy_handler, '0.0.0.0', PROXY_PORT)
+        print('[LOG] Сервер запущен, ожидание соединений...')
         await server.serve_forever()
     finally:
         set_proxy(False)
         mux.close()
-        print('\n[+] Disconnected')
+        print('\n[LOG] Отключено')
 
 
 if __name__ == '__main__':
