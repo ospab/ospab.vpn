@@ -12,6 +12,11 @@ import uuid
 PORT = int(os.environ.get('PORT', 443))
 UUID = os.environ.get('UUID', '')
 SNI = os.environ.get('SNI', 'www.microsoft.com')
+DEBUG = False
+
+def log(msg):
+    if DEBUG:
+        print(f'[LOG] {msg}')
 
 
 def derive_key(uuid_str):
@@ -33,30 +38,34 @@ def verify_client_hello(data, uuid_str):
 
 def extract_sni(data):
     try:
-        # Find SNI extension by scanning the entire data
-        pos = 0
-        while pos < len(data) - 30:
-            if data[pos:pos+2] == b'\x00\x00':
-                ext_length = struct.unpack('>H', data[pos+2:pos+4])[0]
-                if 20 <= ext_length <= 50:  # rough check for SNI
-                    sni_pos = pos + 4 + 2
-                    if sni_pos + 3 + 18 < len(data):
-                        entry_type = data[sni_pos]
-                        if entry_type == 0:
-                            entry_len = struct.unpack('>H', data[sni_pos+1:sni_pos+3])[0]
-                            if entry_len == 18:
-                                sni = data[sni_pos+3:sni_pos+3+entry_len]
-                                try:
-                                    decoded = sni.decode('utf-8')
-                                    if decoded == 'www.microsoft.com':
-                                        return decoded
-                                except Exception:
-                                    pass
-            pos += 1
+        if len(data) < 76 or data[0] != 0x01:
+            return None
+        # Skip to extensions
+        pos = 38  # after random
+        session_id_len = data[pos]
+        pos += 1 + session_id_len  # skip session_id
+        cipher_len = struct.unpack('>H', data[pos:pos+2])[0]
+        pos += 2 + cipher_len  # skip ciphers
+        comp_len = data[pos]
+        pos += 1 + comp_len  # skip compression
+        ext_len = struct.unpack('>H', data[pos:pos+2])[0]
+        pos += 2
+        ext_end = pos + ext_len
+        while pos + 4 < ext_end:
+            ext_type = struct.unpack('>H', data[pos:pos+2])[0]
+            ext_length = struct.unpack('>H', data[pos+2:pos+4])[0]
+            if ext_type == 0:  # SNI
+                # SNI extension data: list_len (2), entry_type (1)=0, name_len (2), name
+                sni_pos = pos + 4 + 2 + 1
+                if sni_pos + 2 < ext_end:
+                    name_len = struct.unpack('>H', data[sni_pos:sni_pos+2])[0]
+                    if sni_pos + 2 + name_len <= ext_end:
+                        sni = data[sni_pos+2:sni_pos+2+name_len]
+                        return sni.decode('utf-8')
+            pos += 4 + ext_length
         return None
     except Exception:
         return None
-    return None
 
 
 class Cipher:
@@ -243,7 +252,7 @@ def build_server_hello(session_id):
 
 async def handle(reader, writer):
     addr = writer.get_extra_info('peername')
-    print(f'[LOG] Новое соединение от {addr}')
+    log(f'Новое соединение от {addr}')
     sock = writer.get_extra_info('socket')
     if sock:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -251,37 +260,37 @@ async def handle(reader, writer):
     try:
         data = await asyncio.wait_for(reader.read(4096), 10)
         if len(data) < 5 or data[0] != 0x16 or data[1:3] != b'\x03\x01':
-            print(f'[LOG] Не TLS 1.3 ClientHello от {addr}')
+            log(f'Не TLS 1.3 ClientHello от {addr}')
             return writer.close()
         hs_len = struct.unpack('>H', data[3:5])[0]
         if len(data) < 5 + hs_len:
-            print(f'[LOG] Неполный ClientHello от {addr}')
+            log(f'Неполный ClientHello от {addr}')
             return writer.close()
         hello = data[5:5+hs_len]
         if len(hello) < 76 or hello[0] != 0x01:
-            print(f'[LOG] Неверный handshake от {addr}')
+            log(f'Неверный handshake от {addr}')
             return writer.close()
 
-        print(f'[LOG] Получен ClientHello от {addr}: {len(hello)} байт')
+        log(f'Получен ClientHello от {addr}: {len(hello)} байт')
         sni = extract_sni(hello)
-        print(f'[LOG] SNI от {addr}: {sni}')
+        log(f'SNI от {addr}: {sni}')
 
         if verify_client_hello(hello, UUID):
-            print(f'[LOG] Reality аутентификация успешна для {addr}')
+            log(f'Reality аутентификация успешна для {addr}')
             nonce = hello[39:55]
             cipher = Cipher(UUID, nonce)
             writer.write(build_server_hello(nonce + hello[55:71]))
             await writer.drain()
             await Multiplexer(reader, writer, cipher).run()
         else:
-            print(f'[LOG] Reality аутентификация не пройдена для {addr}, проксирую на {sni}')
+            log(f'Reality аутентификация не пройдена для {addr}, проксирую на {sni}')
             await proxy_to_real(reader, writer, data, sni)
     except Exception as e:
-        print(f'[LOG] Ошибка в handle для {addr}: {e}')
+        log(f'Ошибка в handle для {addr}: {e}')
     finally:
         if not writer.is_closing():
             writer.close()
-        print(f'[LOG] Соединение с {addr} закрыто')
+        log(f'Соединение с {addr} закрыто')
 
 
 def get_local_ip():
@@ -316,8 +325,9 @@ def show_banner():
 
 def load_config(path='config.yml'):
     """Load config from YAML file"""
-    global PORT, UUID, SNI
+    global PORT, UUID, SNI, DEBUG
     try:
+        log(f'Загрузка конфига из {path}...')
         with open(path, 'r', encoding='utf-8') as f:
             current_section = None
             config = {}
@@ -338,13 +348,17 @@ def load_config(path='config.yml'):
                         config[key] = value
             
             server = config.get('server', {})
-            PORT = int(server.get('port', PORT))
-            UUID = server.get('uuid', UUID)
-            SNI = server.get('sni', SNI)
+            DEBUG = config.get('debug', 'false').lower() == 'true'
+            PORT = int(server.get('port', config.get('port', PORT)))
+            UUID = server.get('uuid', config.get('uuid', UUID))
+            SNI = server.get('sni', config.get('sni', SNI))
+            log(f'Конфиг загружен: PORT={PORT}, UUID={UUID}, SNI={SNI}, DEBUG={DEBUG}')
             return True
     except FileNotFoundError:
+        log('config.yml не найден')
         return False
-    except Exception:
+    except Exception as e:
+        log(f'Ошибка при загрузке config.yml: {e}')
         return False
 
 

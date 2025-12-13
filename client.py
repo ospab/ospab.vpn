@@ -13,6 +13,11 @@ PORT = int(os.environ.get('PORT', 443))
 UUID = os.environ.get('UUID', '')
 SNI = os.environ.get('SNI', 'www.microsoft.com')
 PROXY_PORT = 10808
+DEBUG = False
+
+def log(msg):
+    if DEBUG:
+        print(f'[LOG] {msg}')
 
 
 def derive_key(uuid_str):
@@ -103,31 +108,34 @@ class Multiplexer:
             if self.connected:
                 return True
             try:
-                print(f'[LOG] Подключение к {server}:{port}...')
+                log(f'Подключение к {server}:{port}...')
                 self.reader, self.writer = await asyncio.wait_for(
                     asyncio.open_connection(server, port), 10)
                 self.writer.get_extra_info('socket').setsockopt(
                     socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 
                 hello, nonce = build_client_hello(sni, uuid_key)
-                print(f'[LOG] Отправка ClientHello: {len(hello)} байт')
+                log(f'Отправка ClientHello: {len(hello)} байт')
                 self.writer.write(hello)
                 await self.writer.drain()
                 
                 resp = await asyncio.wait_for(self.reader.read(1024), 10)
-                print(f'[LOG] Получен ответ: {len(resp)} байт, начинается с {resp[:10].hex() if resp else "пусто"}')
+                log(f'Получен ответ: {len(resp)} байт, начинается с {resp[:10].hex() if resp else "пусто"}')
                 if len(resp) >= 6 and resp[0] == 0x16:
                     try:
                         hs_len = struct.unpack('>H', resp[3:5])[0]
                         if len(resp) >= 5 + hs_len and resp[5] == 0x02:
-                            print(f'[LOG] Успешное подключение к Reality серверу {server}:{port}')
+                            self.cipher = Cipher(uuid_key, nonce)
+                            self.connected = True
+                            log(f'Успешное подключение к Reality серверу {server}:{port}')
+                            asyncio.create_task(self._reader_loop())
                             return True
                     except Exception:
                         pass
-                print('[LOG] Ответ не является корректным Server Hello')
+                log('Ответ не является корректным Server Hello')
                 return False
             except Exception as e:
-                print(f'[LOG] Ошибка подключения: {e}')
+                log(f'Ошибка подключения: {e}')
                 return False
 
     async def _reader_loop(self):
@@ -151,6 +159,8 @@ class Multiplexer:
             pass
         finally:
             self.connected = False
+            if self.writer and not self.writer.is_closing():
+                self.writer.close()
             for q in self.streams.values():
                 await q.put(None)
 
@@ -175,7 +185,7 @@ class Multiplexer:
 
     def close(self):
         self.connected = False
-        if self.writer:
+        if self.writer and not self.writer.is_closing():
             self.writer.close()
         self.streams.clear()
 
@@ -260,9 +270,9 @@ def show_banner():
 
 def load_config(path='config.yml'):
     """Load config from YAML file"""
-    global SERVER, PORT, UUID, SNI, PROXY_PORT
+    global SERVER, PORT, UUID, SNI, PROXY_PORT, DEBUG
     try:
-        print(f'[LOG] Загрузка конфига из {path}...')
+        log(f'Загрузка конфига из {path}...')
         with open(path, 'r', encoding='utf-8') as f:
             current_section = None
             config = {}
@@ -283,20 +293,21 @@ def load_config(path='config.yml'):
                         config[key] = value
             server = config.get('server', {})
             proxy = config.get('proxy', {})
-            print(f'[LOG] server: {server}')
-            print(f'[LOG] proxy: {proxy}')
-            SERVER = server.get('ip', SERVER)
-            PORT = int(server.get('port', PORT))
-            UUID = server.get('uuid', UUID)
-            SNI = server.get('sni', SNI)
-            PROXY_PORT = int(proxy.get('port', PROXY_PORT))
-            print(f'[LOG] Конфиг загружен: SERVER={SERVER}, PORT={PORT}, UUID={UUID}, SNI={SNI}, PROXY_PORT={PROXY_PORT}')
+            log(f'server: {server}')
+            log(f'proxy: {proxy}')
+            SERVER = server.get('ip', config.get('server', SERVER))
+            PORT = int(server.get('port', config.get('port', PORT)))
+            UUID = server.get('uuid', config.get('uuid', UUID))
+            SNI = server.get('sni', config.get('sni', SNI))
+            PROXY_PORT = int(proxy.get('port', config.get('proxy_port', PROXY_PORT)))
+            DEBUG = config.get('debug', 'false').lower() == 'true'
+            log(f'Конфиг загружен: SERVER={SERVER}, PORT={PORT}, UUID={UUID}, SNI={SNI}, PROXY_PORT={PROXY_PORT}, DEBUG={DEBUG}')
             return True
     except FileNotFoundError:
-        print(f'[LOG] config.yml не найден')
+        log('config.yml не найден')
         return False
     except Exception as e:
-        print(f'[LOG] Ошибка при загрузке config.yml: {e}')
+        log(f'Ошибка при загрузке config.yml: {e}')
         return False
 
 
@@ -306,7 +317,7 @@ def setup():
     # Try loading config.yml first
     if os.path.exists('config.yml') and load_config('config.yml'):
         if SERVER and UUID and UUID != 'your-uuid-here':
-            print('[LOG] Конфиг успешно загружен из config.yml')
+            log('Конфиг успешно загружен из config.yml')
             return True
     
     if len(sys.argv) == 5:
@@ -340,45 +351,45 @@ def setup():
 
 
 async def test_connection():
-    print(f'\n[LOG] Проверка соединения Reality: {SERVER}:{PORT}, UUID={UUID}, SNI={SNI}')
+    log(f'Проверка соединения Reality: {SERVER}:{PORT}, UUID={UUID}, SNI={SNI}')
     try:
         r, w = await asyncio.wait_for(asyncio.open_connection(SERVER, PORT), 5)
         hello, nonce = build_client_hello(SNI, UUID)
-        print(f'[LOG] Отправка ClientHello: {len(hello)} байт')
+        log(f'Отправка ClientHello: {len(hello)} байт')
         w.write(hello)
         await w.drain()
         resp = await asyncio.wait_for(r.read(1024), 5)
         w.close()
-        print(f'[LOG] Получен ответ: {len(resp)} байт, начинается с {resp[:10].hex() if resp else "пусто"}')
+        log(f'Получен ответ: {len(resp)} байт, начинается с {resp[:10].hex() if resp else "пусто"}')
         if len(resp) >= 6 and resp[0] == 0x16:
             try:
                 hs_len = struct.unpack('>H', resp[3:5])[0]
                 if len(resp) >= 5 + hs_len and resp[5] == 0x02:
-                    print('[LOG] Reality handshake успешен!')
+                    log('Reality handshake успешен!')
                     return True
             except Exception:
                 pass
-        print('[LOG] Некорректный ответ сервера')
+        log('Некорректный ответ сервера')
         return False
     except Exception as e:
-        print(f'[LOG] Ошибка соединения: {e}')
+        log(f'Ошибка соединения: {e}')
         return False
 
 
 async def main():
-    print('[LOG] Запуск клиента...')
+    log('Запуск клиента...')
     if not setup():
-        print('[LOG] setup() вернул False, выход')
+        log('setup() вернул False, выход')
         return
-    print('[LOG] setup() завершён')
+    log('setup() завершён')
     if not await test_connection():
-        print('[LOG] test_connection() неудачен, выход')
+        log('test_connection() неудачен, выход')
         return
-    print('[LOG] test_connection() успешен')
+    log('test_connection() успешен')
     if not await mux.connect(SERVER, PORT, UUID, SNI):
-        print('[LOG] mux.connect() неудачен, выход')
+        log('mux.connect() неудачен, выход')
         return print('[-] Failed to establish tunnel')
-    print('[LOG] mux.connect() успешен')
+    log('mux.connect() успешен')
     print(f'''
 ╔══════════════════════════════════════════════════════╗
 ║            ospab.vpn Reality Client                  ║
@@ -395,17 +406,17 @@ async def main():
 ╚══════════════════════════════════════════════════════╝
 ''')
     set_proxy(True)
-    print(f'[LOG] HTTP Proxy слушает на 0.0.0.0:{PROXY_PORT}')
+    log(f'HTTP Proxy слушает на 0.0.0.0:{PROXY_PORT}')
     print('[*] Press Ctrl+C to disconnect\n')
     try:
-        print('[LOG] Запуск asyncio.start_server...')
+        log('Запуск asyncio.start_server...')
         server = await asyncio.start_server(proxy_handler, '0.0.0.0', PROXY_PORT)
-        print('[LOG] Сервер запущен, ожидание соединений...')
+        log('Сервер запущен, ожидание соединений...')
         await server.serve_forever()
     finally:
         set_proxy(False)
         mux.close()
-        print('\n[LOG] Отключено')
+        log('Отключено')
 
 
 if __name__ == '__main__':
