@@ -262,6 +262,36 @@ async def handle(reader, writer):
             writer.close()
 
 
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '0.0.0.0'
+
+
+def show_banner():
+    print('''
+    ╔═══════════════════════════════════════════════════╗
+    ║                                                   ║
+    ║   ▒█████    ██████  ██▓███   ▄▄▄       ▄▄▄▄      ║
+    ║  ▒██▒  ██▒▒██    ▒ ▓██░  ██▒▒████▄    ▓█████▄    ║
+    ║  ▒██░  ██▒░ ▓██▄   ▓██░ ██▓▒▒██  ▀█▄  ▒██▒ ▄██   ║
+    ║  ▒██   ██░  ▒   ██▒▒██▄█▓▒ ▒░██▄▄▄▄██ ▒██░█▀     ║
+    ║  ░ ████▓▒░▒██████▒▒▒██▒ ░  ░ ▓█   ▓██▒░▓█  ▀█▓   ║
+    ║  ░ ▒░▒░▒░ ▒ ▒▓▒ ▒ ░▒▓▒░ ░  ░ ▒▒   ▓▒█░░▒▓███▀▒   ║
+    ║    ░ ▒ ▒░ ░ ░▒  ░ ░░▒ ░       ▒   ▒▒ ░▒░▒   ░    ║
+    ║  ░ ░ ░ ▒  ░  ░  ░  ░░         ░   ▒    ░    ░    ║
+    ║      ░ ░        ░                 ░  ░ ░         ║
+    ║                                             ░    ║
+    ║           Reality VPN Server v2.0                ║
+    ╚═══════════════════════════════════════════════════╝
+''')
+
+
 def setup():
     global PORT, UUID, SNI
     if len(sys.argv) == 4:
@@ -271,18 +301,34 @@ def setup():
         print('Usage: server.py <port> <uuid> <sni>')
         return False
 
-    PORT = int(input('[?] Port [443]: ').strip() or 443)
+    show_banner()
+    print('=' * 50)
+    print('           Server Configuration')
+    print('=' * 50)
+    
+    PORT = int(input('\n[?] Port [443]: ').strip() or 443)
     UUID = input('[?] UUID (empty=generate): ').strip() or str(uuid.uuid4())
     SNI = input('[?] SNI [www.microsoft.com]: ').strip() or 'www.microsoft.com'
-    print(f'[+] UUID: {UUID}')
     return True
 
 
 async def main():
     if not setup():
         return
-    print(f'[*] ospab.vpn Reality Server')
-    print(f'[*] Port: {PORT} | SNI: {SNI}')
+    
+    ip = get_local_ip()
+    print(f'''
+╔══════════════════════════════════════════════════════╗
+║            ospab.vpn Reality Server                  ║
+╠══════════════════════════════════════════════════════╣
+║  Status:    RUNNING                                  ║
+╠══════════════════════════════════════════════════════╣
+║  IP:        {ip:<40} ║
+║  Port:      {PORT:<40} ║
+║  UUID:      {UUID:<40} ║
+║  SNI:       {SNI:<40} ║
+╚══════════════════════════════════════════════════════╝
+''')
     await (await asyncio.start_server(handle, '0.0.0.0', PORT)).serve_forever()
 
 

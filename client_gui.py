@@ -226,20 +226,23 @@ def run_gui():
     client = VPNClient()
     
     root = tk.Tk()
-    root.title("ospab.vpn")
-    root.geometry("400x450")
+    root.title("ospab.vpn - Reality VPN Client")
+    root.geometry("420x500")
     root.resizable(False, False)
     root.configure(bg='#f5f6fa')
     
-    # Header
-    header = tk.Frame(root, bg='#2d3436', height=80)
+    # Header with gradient effect
+    header = tk.Frame(root, bg='#2d3436', height=100)
     header.pack(fill='x')
     header.pack_propagate(False)
-    tk.Label(header, text="🔐 ospab.vpn", font=('Segoe UI', 18, 'bold'), 
-             fg='white', bg='#2d3436').pack(pady=20)
+    
+    tk.Label(header, text="🔐 ospab.vpn", font=('Segoe UI', 22, 'bold'), 
+             fg='white', bg='#2d3436').pack(pady=(15, 5))
+    tk.Label(header, text="Reality VPN Client v2.0", font=('Segoe UI', 9), 
+             fg='#b2bec3', bg='#2d3436').pack()
     
     # Config frame
-    config = tk.LabelFrame(root, text="Configuration", font=('Segoe UI', 10), 
+    config = tk.LabelFrame(root, text=" Configuration ", font=('Segoe UI', 10, 'bold'), 
                            bg='#f5f6fa', padx=15, pady=10)
     config.pack(fill='x', padx=20, pady=15)
     
@@ -251,11 +254,19 @@ def run_gui():
         ttk.Entry(config, textvariable=var, width=30).grid(row=i, column=1, pady=5, padx=10)
         fields[name] = var
     
-    # Status
+    # Status frame
+    status_frame = tk.LabelFrame(root, text=" Status ", font=('Segoe UI', 10, 'bold'), 
+                                  bg='#f5f6fa', padx=15, pady=10)
+    status_frame.pack(fill='x', padx=20, pady=5)
+    
     status_var = tk.StringVar(value="● Disconnected")
-    status = tk.Label(root, textvariable=status_var, font=('Segoe UI', 12, 'bold'), 
+    status = tk.Label(status_frame, textvariable=status_var, font=('Segoe UI', 14, 'bold'), 
                       fg='#e74c3c', bg='#f5f6fa')
-    status.pack(pady=10)
+    status.pack(pady=5)
+    
+    info_var = tk.StringVar(value="Not connected")
+    tk.Label(status_frame, textvariable=info_var, font=('Segoe UI', 9), 
+             fg='gray', bg='#f5f6fa').pack()
     
     def on_connect():
         if client.running:
@@ -263,6 +274,7 @@ def run_gui():
             set_proxy(False)
             status_var.set("● Disconnected")
             status.config(fg='#e74c3c')
+            info_var.set("Not connected")
             btn.config(text="🚀 Connect")
             return
         
@@ -276,6 +288,7 @@ def run_gui():
         
         status_var.set("● Connecting...")
         status.config(fg='#f39c12')
+        info_var.set(f"Connecting to {client.server}:{client.port}...")
         root.update()
         
         def run():
@@ -285,20 +298,33 @@ def run_gui():
                 set_proxy(True)
                 root.after(0, lambda: status_var.set("● Connected"))
                 root.after(0, lambda: status.config(fg='#27ae60'))
+                root.after(0, lambda: info_var.set(f"Proxy: 127.0.0.1:{PROXY_PORT}"))
                 root.after(0, lambda: btn.config(text="🛑 Disconnect"))
                 client.loop.run_until_complete(client.start())
             except Exception:
                 root.after(0, lambda: status_var.set("● Error"))
                 root.after(0, lambda: status.config(fg='#e74c3c'))
+                root.after(0, lambda: info_var.set("Connection failed"))
                 set_proxy(False)
         
         threading.Thread(target=run, daemon=True).start()
     
-    btn = ttk.Button(root, text="🚀 Connect", command=on_connect, width=20)
-    btn.pack(pady=10)
+    # Buttons frame
+    btn_frame = tk.Frame(root, bg='#f5f6fa')
+    btn_frame.pack(pady=15)
     
-    tk.Label(root, text=f"Proxy: 127.0.0.1:{PROXY_PORT}", font=('Segoe UI', 9), 
-             fg='gray', bg='#f5f6fa').pack(side='bottom', pady=10)
+    style = ttk.Style()
+    style.configure('Accent.TButton', font=('Segoe UI', 11, 'bold'))
+    
+    btn = ttk.Button(btn_frame, text="🚀 Connect", command=on_connect, width=20, style='Accent.TButton')
+    btn.pack()
+    
+    # Footer
+    footer = tk.Frame(root, bg='#f5f6fa')
+    footer.pack(side='bottom', fill='x', pady=10)
+    
+    tk.Label(footer, text="ospab.vpn • Reality Protocol • DPI-resistant", 
+             font=('Segoe UI', 8), fg='#b2bec3', bg='#f5f6fa').pack()
     
     def on_close():
         if client.running:

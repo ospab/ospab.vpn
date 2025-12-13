@@ -232,6 +232,25 @@ def set_proxy(enable):
             pass
 
 
+def show_banner():
+    print('''
+    ╔═══════════════════════════════════════════════════╗
+    ║                                                   ║
+    ║   ▒█████    ██████  ██▓███   ▄▄▄       ▄▄▄▄      ║
+    ║  ▒██▒  ██▒▒██    ▒ ▓██░  ██▒▒████▄    ▓█████▄    ║
+    ║  ▒██░  ██▒░ ▓██▄   ▓██░ ██▓▒▒██  ▀█▄  ▒██▒ ▄██   ║
+    ║  ▒██   ██░  ▒   ██▒▒██▄█▓▒ ▒░██▄▄▄▄██ ▒██░█▀     ║
+    ║  ░ ████▓▒░▒██████▒▒▒██▒ ░  ░ ▓█   ▓██▒░▓█  ▀█▓   ║
+    ║  ░ ▒░▒░▒░ ▒ ▒▓▒ ▒ ░▒▓▒░ ░  ░ ▒▒   ▓▒█░░▒▓███▀▒   ║
+    ║    ░ ▒ ▒░ ░ ░▒  ░ ░░▒ ░       ▒   ▒▒ ░▒░▒   ░    ║
+    ║  ░ ░ ░ ▒  ░  ░  ░  ░░         ░   ▒    ░    ░    ║
+    ║      ░ ░        ░                 ░  ░ ░         ║
+    ║                                             ░    ║
+    ║           Reality VPN Client v2.0                ║
+    ╚═══════════════════════════════════════════════════╝
+''')
+
+
 def setup():
     global SERVER, PORT, UUID, SNI
     if len(sys.argv) == 5:
@@ -241,23 +260,77 @@ def setup():
         print('Usage: client.py <server> <port> <uuid> <sni>')
         return False
 
-    SERVER = input('[?] Server IP: ').strip()
+    show_banner()
+    print('=' * 50)
+    print('           Connection Setup')
+    print('=' * 50)
+    
+    while True:
+        SERVER = input('\n[?] Server IP: ').strip()
+        if SERVER:
+            break
+        print('    [-] Server IP is required')
+    
     PORT = int(input('[?] Port [443]: ').strip() or 443)
-    UUID = input('[?] UUID: ').strip()
+    
+    while True:
+        UUID = input('[?] UUID: ').strip()
+        if UUID:
+            break
+        print('    [-] UUID is required')
+    
     SNI = input('[?] SNI [www.microsoft.com]: ').strip() or 'www.microsoft.com'
-    return bool(SERVER and UUID)
+    return True
+
+
+async def test_connection():
+    print('\n[*] Testing Reality connection...')
+    try:
+        r, w = await asyncio.wait_for(asyncio.open_connection(SERVER, PORT), 5)
+        hello, _ = build_client_hello(SNI, UUID)
+        w.write(hello)
+        await w.drain()
+        resp = await asyncio.wait_for(r.read(1024), 5)
+        w.close()
+        if len(resp) >= 10 and resp[0] == 0x16 and resp[5] == 0x02:
+            print('[+] Reality handshake successful!')
+            return True
+        print('[-] Invalid server response')
+        return False
+    except Exception as e:
+        print(f'[-] Connection failed: {e}')
+        return False
 
 
 async def main():
     if not setup():
         return
     
-    print(f'[*] Connecting to {SERVER}:{PORT}...')
-    if not await mux.connect(SERVER, PORT, UUID, SNI):
-        return print('[-] Connection failed')
+    if not await test_connection():
+        return
     
-    print(f'[+] Connected! Proxy: 127.0.0.1:{PROXY_PORT}')
+    if not await mux.connect(SERVER, PORT, UUID, SNI):
+        return print('[-] Failed to establish tunnel')
+    
+    print(f'''
+╔══════════════════════════════════════════════════════╗
+║            ospab.vpn Reality Client                  ║
+╠══════════════════════════════════════════════════════╣
+║  Server:    {SERVER}:{PORT:<28} ║
+║  Local:     127.0.0.1:{PROXY_PORT:<30} ║
+║  SNI:       {SNI:<40} ║
+║  Status:    CONNECTED                                ║
+╠══════════════════════════════════════════════════════╣
+║  Features:                                           ║
+║  • Real TLS handshake                                ║
+║  • Hidden authentication                             ║
+║  • DPI-resistant                                     ║
+╚══════════════════════════════════════════════════════╝
+''')
+    
     set_proxy(True)
+    print(f'[+] HTTP Proxy listening on 0.0.0.0:{PROXY_PORT}')
+    print('[*] Press Ctrl+C to disconnect\n')
     
     try:
         server = await asyncio.start_server(proxy_handler, '0.0.0.0', PROXY_PORT)
@@ -265,6 +338,7 @@ async def main():
     finally:
         set_proxy(False)
         mux.close()
+        print('\n[+] Disconnected')
 
 
 if __name__ == '__main__':
