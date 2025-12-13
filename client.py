@@ -24,6 +24,23 @@ def derive_key(uuid_str):
     return hashlib.sha256(f"reality-auth-{uuid_str}".encode()).digest()
 
 
+def save_config(path='config.yml'):
+    """Save config to YAML file"""
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("server:\n")
+            f.write(f"  ip: {SERVER}\n")
+            f.write(f"  port: {PORT}\n")
+            f.write(f"  uuid: {UUID}\n")
+            f.write(f"  sni: {SNI}\n")
+            f.write("proxy:\n")
+            f.write(f"  port: {PROXY_PORT}\n")
+            f.write(f"debug: {str(DEBUG).lower()}\n")
+        log(f'Конфиг сохранён в {path}')
+    except Exception as e:
+        log(f'Ошибка сохранения config.yml: {e}')
+
+
 def build_client_hello(sni, uuid_str):
     """Build TLS 1.3 ClientHello with HMAC hidden in session_id"""
     nonce = os.urandom(16)
@@ -248,8 +265,13 @@ def set_proxy(enable):
         except Exception:
             pass
     else:
-        # For Linux/WSL, proxy is set via environment variables by user
-        pass
+        # For Linux/WSL, set environment variables for the process
+        if enable:
+            os.environ['http_proxy'] = f'http://127.0.0.1:{PROXY_PORT}'
+            os.environ['https_proxy'] = f'http://127.0.0.1:{PROXY_PORT}'
+        else:
+            os.environ.pop('http_proxy', None)
+            os.environ.pop('https_proxy', None)
 
 
 def show_banner():
@@ -350,6 +372,7 @@ def setup():
         print('    [-] UUID is required')
     
     SNI = input('[?] SNI [www.microsoft.com]: ').strip() or 'www.microsoft.com'
+    save_config()
     return True
 
 
@@ -385,6 +408,12 @@ async def main():
         log('setup() вернул False, выход')
         return
     log('setup() завершён')
+    if sys.platform != 'win32':
+        print('=' * 50)
+        print('Для использования прокси в других программах выполните:')
+        print(f'export http_proxy=http://127.0.0.1:{PROXY_PORT}')
+        print(f'export https_proxy=http://127.0.0.1:{PROXY_PORT}')
+        print('=' * 50)
     if not await test_connection():
         log('test_connection() неудачен, выход')
         return

@@ -19,8 +19,17 @@ def log(msg):
         print(f'[LOG] {msg}')
 
 
-def derive_key(uuid_str):
-    return hashlib.sha256(f"reality-auth-{uuid_str}".encode()).digest()
+def save_config(path='config.yml'):
+    """Save config to YAML file"""
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(f"port: {PORT}\n")
+            f.write(f"uuid: {UUID}\n")
+            f.write(f"sni: {SNI}\n")
+            f.write(f"debug: {str(DEBUG).lower()}\n")
+        log(f'Конфиг сохранён в {path}')
+    except Exception as e:
+        log(f'Ошибка сохранения config.yml: {e}')
 
 
 def verify_client_hello(data, uuid_str):
@@ -386,6 +395,7 @@ def setup():
     PORT = int(input('\n[?] Port [443]: ').strip() or 443)
     UUID = input('[?] UUID (empty=generate): ').strip() or str(uuid.uuid4())
     SNI = input('[?] SNI [www.microsoft.com]: ').strip() or 'www.microsoft.com'
+    save_config()
     return True
 
 
