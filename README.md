@@ -1,63 +1,80 @@
-# VLESS-Reality VPN
+# ospab.vpn
 
-Encrypted VPN tunnel with traffic obfuscation.
+Reality VPN — протокол с маскировкой под TLS-трафик легитимного сайта.
 
-## Quick Start
+## Архитектура
 
-### Server
-```bash
-# Windows
-python server.py [port] [uuid]
-
-# Linux
-python3 server.py [port] [uuid]
+```
+┌─────────────┐     TLS ClientHello      ┌─────────────┐     HTTP(S)     ┌────────────┐
+│   Client    │ ─────────────────────────▶│   Server    │ ───────────────▶│  Internet  │
+│ (client.py) │ ◀─────────────────────────│ (server.py) │ ◀───────────────│            │
+└─────────────┘   Encrypted Multiplex     └─────────────┘                 └────────────┘
+      │
+      │ HTTP Proxy :10808
+      ▼
+┌─────────────┐
+│   Browser   │
+└─────────────┘
 ```
 
-Server will display UUID on startup if not provided.
+## Запуск
 
-### Client
+### Сервер
 ```bash
-# Windows
-python client.py <uuid> [server_ip] [port]
-
-# Linux
-python3 client.py <uuid> [server_ip] [port]
+python server.py <port> <uuid> <sni>
+python server.py 443 my-secret-key www.microsoft.com
 ```
 
-Client starts HTTP proxy on `127.0.0.1:10808` and configures system proxy automatically.
+### Клиент (CLI)
+```bash
+python client.py <server_ip> <port> <uuid> <sni>
+python client.py 1.2.3.4 443 my-secret-key www.microsoft.com
+```
 
-## Environment Variables
+### Клиент (GUI)
+```bash
+python client_gui.py
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `UUID` | auto-generated | Authentication key |
-| `PORT` | 4433 | Server listen port |
-| `SERVER` | 127.0.0.1 | Server IP (client) |
-| `SNI` | www.microsoft.com | TLS SNI for camouflage |
+## Как это работает
 
-## How It Works
+1. **Handshake**: Клиент отправляет настоящий TLS ClientHello с HMAC-аутентификацией в поле `session_id`
+2. **Проверка**: Сервер проверяет HMAC — если не совпадает, проксирует на реальный сайт (fallback)
+3. **Шифрование**: SHA256-CTR поточный шифр на базе UUID и nonce
+4. **Мультиплексинг**: Все соединения через один туннель с frame-протоколом `[4B id][2B len][data]`
 
-1. Client connects to server with encrypted Reality handshake
-2. Server validates magic header, rejects invalid traffic as HTTP 404 (decoy)
-3. Client starts local HTTP proxy (10808)
-4. All HTTP/HTTPS traffic is tunneled through encrypted connection
-5. Server forwards requests to target and returns responses
+## Особенности
 
-## Security Features
+- Неотличим от обычного HTTPS-трафика
+- Fallback на реальный сервер SNI для неаутентифицированных соединений
+- Автоматическая настройка системного прокси (Windows)
+- GUI-клиент для Windows
 
-- SHA256-based stream cipher encryption
-- IP ban after 5 failed auth attempts (1 hour)
-- Decoy response for non-VLESS traffic (mimics nginx 404)
-- Traffic obfuscation via Reality protocol
+## Файлы
 
-## Files
+| Файл | Описание |
+|------|----------|
+| `server.py` | Reality-сервер (~280 строк) |
+| `client.py` | CLI-клиент (~270 строк) |
+| `client_gui.py` | GUI-клиент Tkinter (~290 строк) |
 
-- `server.py` - VPN server with proxy relay
-- `client.py` - VPN client with local HTTP proxy
-- `start_server.bat/sh` - Server launcher
-- `start_client.bat/sh` - Client launcher
+## Структура протокола
 
-## Requirements
+### ClientHello Authentication
+```
+session_id[32] = nonce[16] + HMAC-SHA256(nonce, derive_key(uuid))[:16]
+derive_key(uuid) = SHA256("reality-auth-" + uuid)
+```
 
-- Python 3.7+
-- No external dependencies
+### Frame Format
+```
+[4 bytes] stream_id (big-endian)
+[2 bytes] length (big-endian)
+[N bytes] encrypted payload
+```
+
+### Cipher (SHA256-CTR)
+```
+block[i] = SHA256(key + nonce + counter)
+ciphertext = plaintext XOR keystream
+```

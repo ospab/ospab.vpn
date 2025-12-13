@@ -3,7 +3,7 @@
 
 server:
   ip: "127.0.0.1"
-  port: 4433
+  port: 443
   uuid: "your-uuid-here"
   sni: "www.microsoft.com"
 
