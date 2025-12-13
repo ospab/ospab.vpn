@@ -116,15 +116,16 @@ class Multiplexer:
                 
                 resp = await asyncio.wait_for(self.reader.read(1024), 10)
                 print(f'[LOG] Получен ответ: {len(resp)} байт, начинается с {resp[:10].hex() if resp else "пусто"}')
-                if len(resp) < 10 or resp[0] != 0x16:
-                    print('[LOG] Ответ не является TLS handshake')
-                    return False
-                
-                self.cipher = Cipher(uuid_key, nonce)
-                self.connected = True
-                print(f'[LOG] Успешное подключение к Reality серверу {server}:{port}')
-                asyncio.create_task(self._reader_loop())
-                return True
+                if len(resp) >= 6 and resp[0] == 0x16:
+                    try:
+                        hs_len = struct.unpack('>H', resp[3:5])[0]
+                        if len(resp) >= 5 + hs_len and resp[5] == 0x02:
+                            print(f'[LOG] Успешное подключение к Reality серверу {server}:{port}')
+                            return True
+                    except Exception:
+                        pass
+                print('[LOG] Ответ не является корректным Server Hello')
+                return False
             except Exception as e:
                 print(f'[LOG] Ошибка подключения: {e}')
                 return False
@@ -349,9 +350,14 @@ async def test_connection():
         resp = await asyncio.wait_for(r.read(1024), 5)
         w.close()
         print(f'[LOG] Получен ответ: {len(resp)} байт, начинается с {resp[:10].hex() if resp else "пусто"}')
-        if len(resp) >= 10 and resp[0] == 0x16 and resp[5] == 0x02:
-            print('[LOG] Reality handshake успешен!')
-            return True
+        if len(resp) >= 6 and resp[0] == 0x16:
+            try:
+                hs_len = struct.unpack('>H', resp[3:5])[0]
+                if len(resp) >= 5 + hs_len and resp[5] == 0x02:
+                    print('[LOG] Reality handshake успешен!')
+                    return True
+            except Exception:
+                pass
         print('[LOG] Некорректный ответ сервера')
         return False
     except Exception as e:

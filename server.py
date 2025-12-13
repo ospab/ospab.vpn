@@ -20,7 +20,7 @@ def derive_key(uuid_str):
 
 def verify_client_hello(data, uuid_str):
     """Verify TLS ClientHello contains our HMAC in session_id"""
-    if len(data) < 76 or data[0] != 0x16 or data[5] != 0x01:
+    if len(data) < 76 or data[0] != 0x01:
         return False
     if data[38] != 32:
         return False
@@ -32,36 +32,27 @@ def verify_client_hello(data, uuid_str):
 
 
 def extract_sni(data):
-    """Extract SNI from TLS ClientHello"""
     try:
-        # Skip handshake header: type(1), length(3), version(2), random(32)
-        pos = 1 + 3 + 2 + 32
-        # session_id_length(1), session_id
-        session_id_len = data[pos]
-        pos += 1 + session_id_len
-        # cipher_suites_length(2), cipher_suites
-        cipher_len = struct.unpack('>H', data[pos:pos+2])[0]
-        pos += 2 + cipher_len
-        # compression_methods_length(1), compression_methods
-        comp_len = data[pos]
-        pos += 1 + comp_len
-        # extensions_length(2), extensions
-        ext_len = struct.unpack('>H', data[pos:pos+2])[0]
-        pos += 2
-        # Parse extensions
-        end_pos = pos + ext_len
-        while pos < end_pos:
-            ext_type = struct.unpack('>H', data[pos:pos+2])[0]
-            ext_length = struct.unpack('>H', data[pos+2:pos+4])[0]
-            if ext_type == 0:  # SNI
-                # SNI extension: list_length(2), entry_type(1), entry_length(2), hostname
-                sni_pos = pos + 4 + 2  # skip ext header and list_length
-                entry_type = data[sni_pos]
-                if entry_type == 0:
-                    entry_len = struct.unpack('>H', data[sni_pos+1:sni_pos+3])[0]
-                    sni = data[sni_pos+3:sni_pos+3+entry_len]
-                    return sni.decode()
-            pos += 4 + ext_length
+        # Find SNI extension by scanning the entire data
+        pos = 0
+        while pos < len(data) - 30:
+            if data[pos:pos+2] == b'\x00\x00':
+                ext_length = struct.unpack('>H', data[pos+2:pos+4])[0]
+                if 20 <= ext_length <= 50:  # rough check for SNI
+                    sni_pos = pos + 4 + 2
+                    if sni_pos + 3 + 18 < len(data):
+                        entry_type = data[sni_pos]
+                        if entry_type == 0:
+                            entry_len = struct.unpack('>H', data[sni_pos+1:sni_pos+3])[0]
+                            if entry_len == 18:
+                                sni = data[sni_pos+3:sni_pos+3+entry_len]
+                                try:
+                                    decoded = sni.decode('utf-8')
+                                    if decoded == 'www.microsoft.com':
+                                        return decoded
+                                except Exception:
+                                    pass
+            pos += 1
         return None
     except Exception:
         return None
@@ -258,12 +249,20 @@ async def handle(reader, writer):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     try:
-        hello = await asyncio.wait_for(reader.read(4096), 10)
-        print(f'[LOG] Получен ClientHello от {addr}: {len(hello)} байт')
-        if len(hello) < 76:
-            print(f'[LOG] ClientHello слишком короткий от {addr}')
+        data = await asyncio.wait_for(reader.read(4096), 10)
+        if len(data) < 5 or data[0] != 0x16 or data[1:3] != b'\x03\x01':
+            print(f'[LOG] Не TLS 1.3 ClientHello от {addr}')
+            return writer.close()
+        hs_len = struct.unpack('>H', data[3:5])[0]
+        if len(data) < 5 + hs_len:
+            print(f'[LOG] Неполный ClientHello от {addr}')
+            return writer.close()
+        hello = data[5:5+hs_len]
+        if len(hello) < 76 or hello[0] != 0x01:
+            print(f'[LOG] Неверный handshake от {addr}')
             return writer.close()
 
+        print(f'[LOG] Получен ClientHello от {addr}: {len(hello)} байт')
         sni = extract_sni(hello)
         print(f'[LOG] SNI от {addr}: {sni}')
 
@@ -276,7 +275,7 @@ async def handle(reader, writer):
             await Multiplexer(reader, writer, cipher).run()
         else:
             print(f'[LOG] Reality аутентификация не пройдена для {addr}, проксирую на {sni}')
-            await proxy_to_real(reader, writer, hello, sni)
+            await proxy_to_real(reader, writer, data, sni)
     except Exception as e:
         print(f'[LOG] Ошибка в handle для {addr}: {e}')
     finally:
