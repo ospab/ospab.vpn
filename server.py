@@ -277,23 +277,64 @@ def show_banner():
     print('''
     ╔═══════════════════════════════════════════════════╗
     ║                                                   ║
-    ║   ▒█████    ██████  ██▓███   ▄▄▄       ▄▄▄▄      ║
-    ║  ▒██▒  ██▒▒██    ▒ ▓██░  ██▒▒████▄    ▓█████▄    ║
-    ║  ▒██░  ██▒░ ▓██▄   ▓██░ ██▓▒▒██  ▀█▄  ▒██▒ ▄██   ║
-    ║  ▒██   ██░  ▒   ██▒▒██▄█▓▒ ▒░██▄▄▄▄██ ▒██░█▀     ║
-    ║  ░ ████▓▒░▒██████▒▒▒██▒ ░  ░ ▓█   ▓██▒░▓█  ▀█▓   ║
-    ║  ░ ▒░▒░▒░ ▒ ▒▓▒ ▒ ░▒▓▒░ ░  ░ ▒▒   ▓▒█░░▒▓███▀▒   ║
-    ║    ░ ▒ ▒░ ░ ░▒  ░ ░░▒ ░       ▒   ▒▒ ░▒░▒   ░    ║
-    ║  ░ ░ ░ ▒  ░  ░  ░  ░░         ░   ▒    ░    ░    ║
-    ║      ░ ░        ░                 ░  ░ ░         ║
-    ║                                             ░    ║
-    ║           Reality VPN Server v2.0                ║
+    ║   ▒█████    ██████  ██▓███   ▄▄▄       ▄▄▄▄       ║
+    ║  ▒██▒  ██▒▒██    ▒ ▓██░  ██▒▒████▄    ▓█████▄     ║
+    ║  ▒██░  ██▒░ ▓██▄   ▓██░ ██▓▒▒██  ▀█▄  ▒██▒ ▄██    ║
+    ║  ▒██   ██░  ▒   ██▒▒██▄█▓▒ ▒░██▄▄▄▄██ ▒██░█▀      ║
+    ║  ░ ████▓▒░▒██████▒▒▒██▒ ░  ░ ▓█   ▓██▒░▓█  ▀█▓    ║
+    ║  ░ ▒░▒░▒░ ▒ ▒▓▒ ▒ ░▒▓▒░ ░  ░ ▒▒   ▓▒█░░▒▓███▀▒    ║
+    ║    ░ ▒ ▒░ ░ ░▒  ░ ░░▒ ░       ▒   ▒▒ ░▒░▒   ░     ║
+    ║  ░ ░ ░ ▒  ░  ░  ░  ░░         ░   ▒    ░    ░     ║
+    ║      ░ ░        ░                 ░  ░ ░          ║
+    ║                                             ░     ║
+    ║           Reality VPN Server v2.0                 ║
     ╚═══════════════════════════════════════════════════╝
 ''')
 
 
+def load_config(path='config.yml'):
+    """Load config from YAML file"""
+    global PORT, UUID, SNI
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            current_section = None
+            config = {}
+            for line in f:
+                line = line.rstrip()
+                if not line or line.strip().startswith('#'):
+                    continue
+                if not line.startswith(' ') and line.endswith(':'):
+                    current_section = line[:-1].strip()
+                    config[current_section] = {}
+                elif ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if current_section:
+                        config[current_section][key] = value
+                    else:
+                        config[key] = value
+            
+            server = config.get('server', {})
+            PORT = int(server.get('port', PORT))
+            UUID = server.get('uuid', UUID)
+            SNI = server.get('sni', SNI)
+            return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
 def setup():
     global PORT, UUID, SNI
+    
+    # Try loading config.yml first
+    if os.path.exists('config.yml') and load_config('config.yml'):
+        if UUID and UUID != 'your-uuid-here':
+            print('[+] Loaded config from config.yml')
+            return True
+    
     if len(sys.argv) == 4:
         PORT, UUID, SNI = int(sys.argv[1]), sys.argv[2], sys.argv[3]
         return True
