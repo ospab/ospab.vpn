@@ -247,6 +247,9 @@ def set_proxy(enable):
             winreg.CloseKey(key)
         except Exception:
             pass
+    else:
+        # For Linux/WSL, proxy is set via environment variables by user
+        pass
 
 
 def show_banner():
