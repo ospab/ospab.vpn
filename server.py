@@ -34,22 +34,37 @@ def verify_client_hello(data, uuid_str):
 def extract_sni(data):
     """Extract SNI from TLS ClientHello"""
     try:
-        pos = 43 + data[38]
-        pos += 2 + struct.unpack('>H', data[pos:pos+2])[0]
-        pos += 1 + data[pos]
+        # Skip handshake header: type(1), length(3), version(2), random(32)
+        pos = 1 + 3 + 2 + 32
+        # session_id_length(1), session_id
+        session_id_len = data[pos]
+        pos += 1 + session_id_len
+        # cipher_suites_length(2), cipher_suites
+        cipher_len = struct.unpack('>H', data[pos:pos+2])[0]
+        pos += 2 + cipher_len
+        # compression_methods_length(1), compression_methods
+        comp_len = data[pos]
+        pos += 1 + comp_len
+        # extensions_length(2), extensions
         ext_len = struct.unpack('>H', data[pos:pos+2])[0]
         pos += 2
-        end = pos + ext_len
-        
-        while pos < end:
+        # Parse extensions
+        end_pos = pos + ext_len
+        while pos < end_pos:
             ext_type = struct.unpack('>H', data[pos:pos+2])[0]
-            ext_data_len = struct.unpack('>H', data[pos+2:pos+4])[0]
-            if ext_type == 0:
-                sni_len = struct.unpack('>H', data[pos+7:pos+9])[0]
-                return data[pos+9:pos+9+sni_len].decode()
-            pos += 4 + ext_data_len
+            ext_length = struct.unpack('>H', data[pos+2:pos+4])[0]
+            if ext_type == 0:  # SNI
+                # SNI extension: list_length(2), entry_type(1), entry_length(2), hostname
+                sni_pos = pos + 4 + 2  # skip ext header and list_length
+                entry_type = data[sni_pos]
+                if entry_type == 0:
+                    entry_len = struct.unpack('>H', data[sni_pos+1:sni_pos+3])[0]
+                    sni = data[sni_pos+3:sni_pos+3+entry_len]
+                    return sni.decode()
+            pos += 4 + ext_length
+        return None
     except Exception:
-        pass
+        return None
     return None
 
 
