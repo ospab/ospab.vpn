@@ -32,6 +32,10 @@ def save_config(path='config.yml'):
         log(f'Ошибка сохранения config.yml: {e}')
 
 
+def derive_key(uuid_str):
+    return hashlib.sha256(f"reality-auth-{uuid_str}".encode()).digest()
+
+
 def verify_client_hello(data, uuid_str):
     """Verify TLS ClientHello contains our HMAC in session_id"""
     if len(data) < 76 or data[0] != 0x01:
@@ -340,6 +344,7 @@ def load_config(path='config.yml'):
         with open(path, 'r', encoding='utf-8') as f:
             current_section = None
             config = {}
+
             for line in f:
                 line = line.rstrip()
                 if not line or line.strip().startswith('#'):
@@ -392,9 +397,9 @@ def setup():
     print('           Server Configuration')
     print('=' * 50)
     
-    PORT = int(input('\n[?] Port [443]: ').strip() or 443)
-    UUID = input('[?] UUID (empty=generate): ').strip() or str(uuid.uuid4())
-    SNI = input('[?] SNI [www.microsoft.com]: ').strip() or 'www.microsoft.com'
+    PORT = int(input('\n[?] Port [443]: ') or 443)
+    UUID = input('[?] UUID (empty=generate): ') or str(uuid.uuid4())
+    SNI = input('[?] SNI [www.microsoft.com]: ') or 'www.microsoft.com'
     save_config()
     return True
 

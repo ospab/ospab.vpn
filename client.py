@@ -250,20 +250,31 @@ async def proxy_handler(local_r, local_w):
 
 
 def set_proxy(enable):
+    import subprocess
     if sys.platform == 'win32':
-        import winreg
         try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                r'Software\Microsoft\Windows\CurrentVersion\Internet Settings',
-                0, winreg.KEY_ALL_ACCESS)
             if enable:
+                # Set proxy for WinHTTP (used by many apps)
+                subprocess.run(['netsh', 'winhttp', 'set', 'proxy', f'127.0.0.1:{PROXY_PORT}'], check=True)
+                # Also set for IE via registry
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                    r'Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+                    0, winreg.KEY_ALL_ACCESS)
                 winreg.SetValueEx(key, 'ProxyServer', 0, winreg.REG_SZ, f'127.0.0.1:{PROXY_PORT}')
                 winreg.SetValueEx(key, 'ProxyEnable', 0, winreg.REG_DWORD, 1)
+                winreg.SetValueEx(key, 'ProxyOverride', 0, winreg.REG_SZ, '<local>')
+                winreg.CloseKey(key)
             else:
+                subprocess.run(['netsh', 'winhttp', 'reset', 'proxy'], check=True)
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                    r'Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+                    0, winreg.KEY_ALL_ACCESS)
                 winreg.SetValueEx(key, 'ProxyEnable', 0, winreg.REG_DWORD, 0)
-            winreg.CloseKey(key)
-        except Exception:
-            pass
+                winreg.CloseKey(key)
+        except Exception as e:
+            print(f'Ошибка настройки прокси на Windows: {e}')
     else:
         # For Linux/WSL, set environment variables for the process
         if enable:
@@ -358,20 +369,20 @@ def setup():
     print('=' * 50)
     
     while True:
-        SERVER = input('\n[?] Server IP: ').strip()
+        SERVER = input('\n[?] Server IP: ')
         if SERVER:
             break
         print('    [-] Server IP is required')
     
-    PORT = int(input('[?] Port [443]: ').strip() or 443)
+    PORT = int(input('[?] Port [443]: ') or 443)
     
     while True:
-        UUID = input('[?] UUID: ').strip()
+        UUID = input('[?] UUID: ')
         if UUID:
             break
         print('    [-] UUID is required')
     
-    SNI = input('[?] SNI [www.microsoft.com]: ').strip() or 'www.microsoft.com'
+    SNI = input('[?] SNI [www.microsoft.com]: ') or 'www.microsoft.com'
     save_config()
     return True
 
