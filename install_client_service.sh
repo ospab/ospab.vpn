@@ -34,7 +34,7 @@ fi
 
 SERVICE_NAME="ospab-client.service"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}"
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON_BIN="$(command -v python3 || command -v python)"
 
 if [ -z "$PYTHON_BIN" ]; then
@@ -84,7 +84,7 @@ elif [ "$ACTION" = "remove" ]; then
   rm -f "$UNIT_PATH" || true
   systemctl daemon-reload
   echo "Service $SERVICE_NAME removed"
-  exit 0
+  exit 1
 else
   usage
   exit 1
