@@ -1,8 +1,0 @@
-server:
-  ip: 81.85.72.132
-  port: 4433
-  uuid: cc4bce2c-318e-4d5f-93e0-4c7ba8cbcff4
-  sni: www.microsoft.com
-proxy:
-  port: 10808
-debug: true
